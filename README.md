@@ -2,9 +2,27 @@
 
 This repository contains the implementation of the Sector AI Telegram Bot, an advanced chatbot designed to interact with users on Telegram. The secret sauce is LangChain. The bot supports various functionalities, including autoreply decision-making, structured output parsing for polls, multimodal image processing, emoji responses, code generation, and more. Below is a detailed description of all components of this repository.
 
+### Installing Ollama
+
+To download and manage the recommended models, you will need to install Ollama. Follow these steps to install Ollama and download the models:
+
+1. **Install Ollama**:
+    ```sh
+    curl -sSfL https://ollama.com/download.sh | sh
+    ```
+
+2. **Download the recommended models**:
+    ```sh
+    ollama pull llama3.1:8b
+    ollama pull llava-llama3:8b
+    ```
+
+Make sure you have enough storage space and a stable internet connection to download these models.
+
 ## Recommended Models
-- Gemma 2
 - Llama 3.1
+- Llava Llama 3 (for vision processing)
+- Gemma 2
 - Mistral Nemo
 - Almost anything will work for the basics. However, some models aren't powerful enough for the structured output parsing involved in autoreply, decision, poll, and topic commands.
 
