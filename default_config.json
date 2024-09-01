@@ -3,7 +3,11 @@
     "default_model": "llama3.1:8b",
     "vision_model": "llava-llama3:8b",
     "default_svg_size": 250,
-    "cursor": "🦙",
+    "streaming": {
+        "cursor": "🦙",
+        "interval_sec": 0.7,
+        "chunk_size": 150
+    },
     "admin_usernames": [
         "ex0dus"
     ],

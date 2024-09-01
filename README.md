@@ -7,9 +7,7 @@ This repository contains the implementation of the Sector AI Telegram Bot, an ad
 To download and manage the recommended models, you will need to install Ollama. Follow these steps to install Ollama and download the models:
 
 1. **Install Ollama**:
-    ```sh
-    curl -sSfL https://ollama.com/download.sh | sh
-    ```
+    https://ollama.com/download
 
 2. **Download the recommended models**:
     ```sh

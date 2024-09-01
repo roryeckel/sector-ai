@@ -59,10 +59,10 @@ async def handle_vision(update: Update, context: SectorContext) -> None:
             buffer += chunk
 
             current_time = asyncio.get_event_loop().time()
-            if current_time - last_update >= 0.7 or len(buffer) >= 200:
+            if current_time - last_update >= context.config_streaming_interval_sec or len(buffer) >= context.config_streaming_chunk_size:
                 if update_task:
                     await update_task
-                update_task = asyncio.create_task(update_message(context.config_cursor or ''))
+                update_task = asyncio.create_task(update_message(context.config_streaming_cursor or ''))
 
         if update_task:
             await update_task

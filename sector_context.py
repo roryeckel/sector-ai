@@ -83,6 +83,20 @@ class SectorContext(CallbackContext):
     @property
     def config_vision_system_prompt(self) -> str:
         return self.bot_config['system_prompts']['vision']
+    
+    # Streaming Config
+
+    @property
+    def config_streaming_cursor(self) -> str:
+        return self.bot_config['streaming']['cursor']
+    
+    @property
+    def config_streaming_interval_sec(self) -> int:
+        return self.bot_config['streaming']['interval_sec']
+    
+    @property
+    def config_streaming_chunk_size(self) -> int:
+        return self.bot_config['streaming']['chunk_size']
 
     # Misc Config
 
@@ -101,10 +115,6 @@ class SectorContext(CallbackContext):
     @property
     def config_admin_usernames(self) -> list:
         return self.bot_config['admin_usernames']
-    
-    @property
-    def config_cursor(self) -> str:
-        return self.bot_config['cursor']
     
     # Bot
 
