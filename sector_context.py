@@ -200,6 +200,9 @@ class SectorContext(CallbackContext):
             headers=self.config_ollama_headers)
         self.bot_data['ollama'] = result
         return result
+    
+    def get_model(self) -> str:
+        return self.bot_ollama.model
 
     def get_models(self) -> list:
         response = requests.get(f"{self.config_ollama_url}/api/tags", headers=self.config_ollama_headers)
@@ -207,6 +210,10 @@ class SectorContext(CallbackContext):
             data = response.json()
             result = data["models"]
             result = [r for r in result if r["model"] not in self.config_ollama_disallowed_models]
+            for r in result:
+                r["is_active"] = r["model"] == self.get_model()
+                r["is_vision"] = r["model"] == self.config_vision_model
+                r["label"] = f"{'✅ ' if r['is_active'] else ''}{'👁️‍🗨️ ' if r['is_vision'] else ''}{r['model']}"
             return result
         else:
             return []

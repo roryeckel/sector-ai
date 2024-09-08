@@ -21,7 +21,7 @@ async def clear_cmd(update: Update, context: SectorContext) -> None:
     context.chat_system_prompt = context.config_default_system_prompt
     await update.message.reply_text('Cleared context and set the default system prompt.')
 
-async def model_cmd(update: Update, context: SectorContext) -> None:
+# async def model_cmd(update: Update, context: SectorContext) -> None:
     # model_name = update.message.text.split(maxsplit=1)
     # if len(model_name) > 1:
     #     model_name = model_name[1].strip()
@@ -31,12 +31,12 @@ async def model_cmd(update: Update, context: SectorContext) -> None:
     #         ollama = context.load_model(model_name)
     #         await update.message.reply_text(f'Loaded model {ollama.model}.')
     # else:
-    await update.message.reply_text(f'Model {context.bot_ollama.model} is currently loaded.')
+    # await update.message.reply_text(f'Model {context.get_model()} is currently loaded.')
 
 @admin_only
 async def models_cmd(update: Update, context: SectorContext) -> None:
     models = context.get_models()
-    keyboard = [[InlineKeyboardButton(model["model"], callback_data=model["model"])] for model in models]
+    keyboard = [[InlineKeyboardButton(model["label"], callback_data=model["model"])] for model in models]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text('Available models:', reply_markup=reply_markup)
 

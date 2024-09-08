@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 async def handle_vision(update: Update, context: SectorContext) -> None:
     if not context.chat_autoreply_mode:
         return
-    old_model = context.bot_ollama.model
+    old_model = context.get_model()
 
     vision_prompt = update.message.caption or context.config_vision_system_prompt
 

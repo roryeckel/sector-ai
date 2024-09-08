@@ -14,7 +14,7 @@ from .sector_context import SectorContext
 from .coding import code_cmd, html_cmd, svg_cmd
 from .characterize import characterize_cmd
 from .summarize import summarize_cmd
-from .admin import model_callback, model_cmd, models_cmd, system_prompt_cmd, clear_cmd, temperature_cmd
+from .admin import model_callback, models_cmd, system_prompt_cmd, clear_cmd, temperature_cmd
 from .tokens import tokens_cmd
 import argparse
 from telegram import Update
@@ -86,7 +86,6 @@ def main() -> None:
     application.add_handler(CommandHandler("system", system_prompt_cmd))
     application.add_handler(CommandHandler("characterize", characterize_cmd))
     application.add_handler(CommandHandler("temperature", temperature_cmd))
-    application.add_handler(CommandHandler("model", model_cmd))
     application.add_handler(CommandHandler("models", models_cmd))
     application.add_handler(CallbackQueryHandler(model_callback))
     application.add_handler(CommandHandler("tokens", tokens_cmd))
