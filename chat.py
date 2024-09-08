@@ -17,25 +17,31 @@ async def respond(update: Update, context: SectorContext, system_prompt: str = N
     try:
         response = ''
         buffer = ''
-        last_update = asyncio.get_event_loop().time()
+        last_update = asyncio.get_running_loop().time()
         update_task = None
+        buffer_lock = asyncio.Lock()
 
         async def update_message(message_postfix: str = '') -> None:
             nonlocal buffer, last_update, response
-            if buffer:
-                response += buffer
-            await response_message.edit_text(response + message_postfix)
-            buffer = ''
-            last_update = asyncio.get_event_loop().time()
+            async with buffer_lock:
+                if buffer:
+                    response += buffer
+                buffer = ''
+            try:
+                await response_message.edit_text(response + message_postfix)
+            except Exception as e:
+                logger.error(f"Error updating message: {e}")
+            last_update = asyncio.get_running_loop().time()
         
 
         for chunk in chain.stream(await context.get_system_template_dict()):
             if not chunk:
                 break
 
-            buffer += chunk
+            async with buffer_lock:
+                buffer += chunk
 
-            current_time = asyncio.get_event_loop().time()
+            current_time = asyncio.get_running_loop().time()
             if current_time - last_update >= context.config_streaming_interval_sec or len(buffer) >= context.config_streaming_chunk_size:
                 if update_task:
                     await update_task

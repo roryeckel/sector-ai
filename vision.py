@@ -43,14 +43,19 @@ async def handle_vision(update: Update, context: SectorContext) -> None:
         buffer = ''
         last_update = asyncio.get_event_loop().time()
         update_task = None
+        buffer_lock = asyncio.Lock()
 
         async def update_message(message_postfix: str = '') -> None:
             nonlocal buffer, last_update, response
-            if buffer:
-                response += buffer
-            await response_message.edit_text(response + message_postfix)
-            buffer = ''
-            last_update = asyncio.get_event_loop().time()
+            async with buffer_lock:
+                if buffer:
+                    response += buffer
+                buffer = ''
+            try:
+                await response_message.edit_text(response + message_postfix)
+            except Exception as e:
+                logger.error(f"Error updating message: {e}")
+            last_update = asyncio.get_running_loop().time()
 
         for chunk in context.bot_ollama.stream(messages, images=photo_base64s):
             if not chunk:
@@ -58,7 +63,10 @@ async def handle_vision(update: Update, context: SectorContext) -> None:
 
             buffer += chunk
 
-            current_time = asyncio.get_event_loop().time()
+            async with buffer_lock:
+                buffer += chunk
+
+            current_time = asyncio.get_running_loop().time()
             if current_time - last_update >= context.config_streaming_interval_sec or len(buffer) >= context.config_streaming_chunk_size:
                 if update_task:
                     await update_task
