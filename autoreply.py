@@ -1,6 +1,6 @@
 import logging
 from telegram import Update
-from .chat import respond
+from .chat import handle_chat
 from .decision import make_decision
 from .sector_context import SectorContext
 
@@ -17,7 +17,7 @@ async def decide_to_respond(update: Update, context: SectorContext) -> None:
             logger.exception('Decision Error', exc_info=e)
             should_respond = False
         if should_respond is True:
-            await respond(update, context)
+            await handle_chat(update, context)
         elif isinstance(should_respond, str):
             logger.error(f'Autorespond Decision Error: {should_respond}')
 

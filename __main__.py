@@ -5,7 +5,7 @@ import pkgutil
 
 from .vision import handle_vision
 from .autoreply import autoreply_cmd, decide_to_respond
-from .chat import respond, chat_cmd
+from .chat import handle_chat, chat_cmd
 from .poll import poll_cmd
 from .topic import topic_poll_cmd
 from .emoji import emoji_cmd
@@ -42,7 +42,7 @@ async def handle_message(update: Update, context: SectorContext) -> None:
         if not context.message_exists(new_chat_message):
             context.chat_message_history.append(new_chat_message)
         context.save_user_message(update.message)
-        await respond(update, context)
+        await handle_chat(update, context)
     elif datetime.now(UTC) - update.effective_message.date < timedelta(minutes=7):
         await decide_to_respond(update, context)
 
