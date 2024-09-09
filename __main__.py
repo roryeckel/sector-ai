@@ -4,7 +4,7 @@ import warnings
 import pkgutil
 
 from .vision import handle_vision
-from .autoreply import autoreply_cmd, decide_to_respond
+from .autoreply import autoreply_cmd, should_respond
 from .chat import handle_chat, chat_cmd
 from .poll import poll_cmd
 from .topic import topic_poll_cmd
@@ -43,8 +43,10 @@ async def handle_message(update: Update, context: SectorContext) -> None:
             context.chat_message_history.append(new_chat_message)
         context.save_user_message(update.message)
         await handle_chat(update, context)
-    elif datetime.now(UTC) - update.effective_message.date < timedelta(minutes=7):
-        await decide_to_respond(update, context)
+    elif await should_respond(update, context):
+        if datetime.now(UTC) - update.effective_message.date < timedelta(minutes=2):
+            await handle_chat(update, context)
+        
 
 # Error handler
 async def error_handler(update: Update, context: SectorContext) -> None:
