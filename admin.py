@@ -44,9 +44,42 @@ async def models_cmd(update: Update, context: SectorContext) -> None:
 async def model_callback(update: Update, context: SectorContext) -> None:
     query = update.callback_query
     model_name = query.data
-    ollama = context.load_model(model_name)
+    context.load_model(model_name)
+    model_details = context.get_model_details()
+    model_details_details = model_details.get("details", {})
+    model_info = model_details.get("model_info", {})
     await query.answer()
-    await query.edit_message_text(text=f'Loaded model {ollama.model}.')
+
+    print(model_details)
+
+    message_parts = [f'{model_name}']
+
+    families = model_details_details.get("families")
+    if families:
+        message_parts.append(f'Families: {", ".join(families)}')
+
+    parameter_size = model_details_details.get("parameter_size")
+    if parameter_size:
+        message_parts.append(f'Parameters: {parameter_size}')
+
+    quantization_level = model_details_details.get("quantization_level")
+    if quantization_level:
+        message_parts.append(f'Quantization Level: {quantization_level}')
+
+    finetune = model_info.get("general.finetune")
+    if finetune:
+        message_parts.append(f'Finetune: {finetune}')
+
+    languages = model_info.get("general.languages")
+    if languages:
+        message_parts.append(f'Languages: {", ".join(languages)}')
+
+    tags = model_info.get("general.tags")
+    if tags:
+        message_parts.append(f'Tags: {", ".join(tags)}')
+
+    message = '\n'.join(message_parts)
+    await query.edit_message_text(text=message)
 
 # @admin_only
 # async def models_cmd(update: Update, context: SectorContext) -> None:

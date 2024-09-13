@@ -19,6 +19,7 @@ from .tokens import tokens_cmd
 import argparse
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
+from telegram.error import BadRequest
 from langchain_core.messages import AIMessage
 from datetime import datetime, timedelta, UTC
 
@@ -54,7 +55,13 @@ async def error_handler(update: Update, context: SectorContext) -> None:
     error_str = str(context.error)
     new_chat_message = AIMessage(content=error_str)
     context.chat_message_history.append(new_chat_message)
-    await update.message.reply_text(error_str)
+    try:
+        if update.message:
+            await update.message.reply_text(error_str)
+        else:
+            await update.callback_query.answer(error_str)
+    except BadRequest:
+        pass
 
 # Main function
 def main() -> None:

@@ -203,6 +203,22 @@ class SectorContext(CallbackContext):
     
     def get_model(self) -> str:
         return self.bot_ollama.model
+    
+    def get_model_details(self) -> dict:
+        response = requests.post(
+            f"{self.config_ollama_url}/api/show",
+            headers=self.config_ollama_headers,
+            json={"name": self.get_model()}
+        )
+        if response.ok:
+            result = response.json()
+            result.pop("license", None)
+            result.pop("modelfile", None)
+            result.pop("parameters", None)
+            result.pop("template", None)
+            return result
+        else:
+            return {}
 
     def get_models(self) -> list:
         response = requests.get(f"{self.config_ollama_url}/api/tags", headers=self.config_ollama_headers)
@@ -210,10 +226,21 @@ class SectorContext(CallbackContext):
             data = response.json()
             result = data["models"]
             result = [r for r in result if r["model"] not in self.config_ollama_disallowed_models]
+            
             for r in result:
-                r["is_active"] = r["model"] == self.get_model()
-                r["is_vision"] = r["model"] == self.config_vision_model
-                r["label"] = f"{'✅ ' if r['is_active'] else ''}{'👁️‍🗨️ ' if r['is_vision'] else ''}{r['model']}"
+                show_response = requests.post(
+                    f"{self.config_ollama_url}/api/show",
+                    headers=self.config_ollama_headers,
+                    json={"name": r["model"]}
+                )
+                
+                if show_response.ok:
+                    show_data = show_response.json()
+                    r.update(show_data)
+                
+                r["is_default_active"] = r["model"] == self.get_model()
+                r["is_vision_active"] = r["model"] == self.config_vision_model
+                r["label"] = f"{'✅ ' if r['is_default_active'] else ''}{'👁️‍🗨️ ' if r['is_vision_active'] else ''}{r['model']}"
             return result
         else:
             return []
