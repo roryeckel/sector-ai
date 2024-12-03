@@ -18,10 +18,10 @@ To download and manage the recommended models, you will need to install Ollama. 
 Make sure you have enough storage space and a stable internet connection to download these models.
 
 ## Recommended Models
-- Llama 3.1
-- Llava Llama 3 (for vision processing)
+- Llama 3.2
 - Gemma 2
-- Mistral Nemo
+- Qwen 2.5
+- Mistral Nemo or Small
 - Almost anything will work for the basics. However, some models aren't powerful enough for the structured output parsing involved in autoreply, decision, poll, and topic commands.
 
 ## Features
