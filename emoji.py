@@ -17,7 +17,7 @@ async def emoji_cmd(update: Update, context: SectorContext) -> None:
         template=context.config_emoji_system_prompt,
         input_variables=['input', *system_template_dict.keys()])
     chain = template | context.bot_ollama
-    emoji_response = chain.invoke({'input': prompt, **system_template_dict})
+    emoji_response = chain.invoke({'input': prompt, **system_template_dict}).content
     if len(emoji_response) > MessageLimit.MAX_TEXT_LENGTH:
         emoji_response = emoji_response[:MessageLimit.MAX_TEXT_LENGTH]
     logger.info(f'Response: {emoji_response}')

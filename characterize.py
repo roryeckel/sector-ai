@@ -17,7 +17,7 @@ async def characterize_cmd(update: Update, context: SectorContext) -> None:
         return
     characterization_prompt = characterization_prompt[-1]
     logger.info(f'Characterization Prompt: {characterization_prompt}')
-    characterization = chain.invoke({'input': characterization_prompt, **system_template_dict})
+    characterization = chain.invoke({'input': characterization_prompt, **system_template_dict}).content
     await update.message.reply_text(f'Update the system prompt to generated characterization:\n{characterization}')
     logger.info(f'Characterization: {characterization}')
     context.chat_message_history.clear()

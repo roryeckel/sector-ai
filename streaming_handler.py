@@ -24,7 +24,7 @@ async def handle_streaming_response(
                 response += buffer
             buffer = ''
         try:
-            await response_message.edit_text(response + message_postfix)
+            await response_message.edit_text((response + message_postfix) or " ")
         except Exception as e:
             logger.error(f"Error updating message: {e}")
         last_update = asyncio.get_running_loop().time()
@@ -35,7 +35,7 @@ async def handle_streaming_response(
                 break
 
             async with buffer_lock:
-                buffer += chunk
+                buffer += chunk.content
 
             current_time = asyncio.get_running_loop().time()
             if current_time - last_update >= context.config_streaming_interval_sec or len(buffer) >= context.config_streaming_chunk_size:

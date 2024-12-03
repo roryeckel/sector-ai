@@ -30,14 +30,22 @@ async def handle_vision(update: Update, context: SectorContext) -> None:
         
     response_message = await update.message.reply_text("Processing...")
 
-    photo_files = [await photo.get_file(read_timeout=30, connect_timeout=30) for photo in update.message.photo]
+    photo_files = [await photo.get_file(read_timeout=30, connect_timeout=30) for photo in [update.message.photo[-1]]]
     photo_bytes = [await photo.download_as_bytearray() for photo in photo_files]
     photo_base64s = [base64.b64encode(pb).decode('utf-8') for pb in photo_bytes]
 
     try:
         context.load_model(context.config_vision_model)
 
-        messages = [HumanMessage(content=vision_prompt)]
+        messages = [
+            HumanMessage(content=[
+                { "type": "text", "text": vision_prompt },
+                *({
+                    "type": "image_url",
+                    "image_url": f"data:image/jpeg;base64,{photo_base64}"
+                } for photo_base64 in photo_base64s)
+            ])
+        ]
 
         stream_generator = context.bot_ollama.stream(messages, images=photo_base64s)
         response = await handle_streaming_response(

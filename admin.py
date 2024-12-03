@@ -52,7 +52,7 @@ async def model_callback(update: Update, context: SectorContext) -> None:
 
     print(model_details)
 
-    message_parts = [f'{model_name}']
+    message_parts = [f'Loaded model: {model_name}']
 
     families = model_details_details.get("families")
     if families:

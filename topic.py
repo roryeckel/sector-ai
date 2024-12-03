@@ -15,12 +15,14 @@ class TopicPoll(BaseModel):
                               f"Preferrably 5 topics unless otherwise specified. The length of each topic must be less than {PollLimit.MAX_OPTION_LENGTH} characters.")
 
 async def topic_poll_cmd(update: Update, context: SectorContext) -> None:
+    context.bot_ollama.format = 'json'
     system_template_dict = await context.get_system_template_dict()
     parser = PydanticOutputParser(pydantic_object=TopicPoll)
     prompt_template = context.get_templated_messages(system_prompt=context.config_topic_poll_system_prompt)
     chain = prompt_template | context.bot_ollama | parser
     poll_response = chain.invoke({'format_instructions': parser.get_format_instructions(), **system_template_dict})
     logger.info(f'Topic Poll Response: {poll_response}')
+    context.bot_ollama.format = ''
 
     if not (PollLimit.MIN_OPTION_NUMBER <= len(poll_response.topics) <= PollLimit.MAX_OPTION_NUMBER):
         logger.error(f'Poll Error: Invalid number of topics: {len(poll_response.topics)}')

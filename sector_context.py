@@ -4,8 +4,8 @@ from telegram import Message
 from telegram.ext import Application, CallbackContext
 from telegram.constants import MessageLimit
 from collections import deque
-from langchain_community.llms.ollama import Ollama
-from langchain_core.messages import HumanMessage, ChatMessage, SystemMessage
+from langchain_ollama.chat_models import ChatOllama
+from langchain_core.messages import HumanMessage, ChatMessage
 from langchain_core.prompts import ChatPromptTemplate, SystemMessagePromptTemplate
 
 class SectorContext(CallbackContext):
@@ -28,7 +28,7 @@ class SectorContext(CallbackContext):
     
     @property
     def config_ollama_headers(self) -> dict:
-        return self.bot_config['ollama']['headers']
+        return self.bot_config.get('ollama', {}).get('headers', {})
     
     @property
     def config_ollama_disallowed_models(self) -> list:
@@ -127,7 +127,7 @@ class SectorContext(CallbackContext):
         self.bot_data['config'] = new_config
 
     @property
-    def bot_ollama(self) -> Ollama:
+    def bot_ollama(self) -> ChatOllama:
         try:
             return self.bot_data['ollama']
         except KeyError:
@@ -192,12 +192,14 @@ class SectorContext(CallbackContext):
         self._username = me.username
         return self._username
 
-    def load_model(self, model_name=None) -> Ollama:
-        result = Ollama(
+    def load_model(self, model_name=None) -> ChatOllama:
+        result = ChatOllama(
             model=model_name or self.config_default_model,
             base_url=self.config_ollama_url,
-            timeout=self.config_ollama_timeout,
-            headers=self.config_ollama_headers)
+            client_kwargs={
+                "timeout": self.config_ollama_timeout,
+                "headers": self.config_ollama_headers
+            })
         self.bot_data['ollama'] = result
         return result
     
