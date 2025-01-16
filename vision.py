@@ -47,7 +47,7 @@ async def handle_vision(update: Update, context: SectorContext) -> None:
             ])
         ]
 
-        stream_generator = context.bot_ollama.stream(messages, images=photo_base64s)
+        stream_generator = context.bot_ollama.stream(messages)
         response = await handle_streaming_response(
             context,
             response_message,
