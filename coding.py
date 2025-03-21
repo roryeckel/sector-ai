@@ -74,7 +74,7 @@ async def svg_cmd(update: Update, context: SectorContext) -> None:
     svg_prompt = svg_prompt[-1]
     logger.info(f'SVG Prompt: {svg_prompt}')
     for i in range(3):
-        svg = chain.invoke({'input': svg_prompt, **system_template_dict}).content
+        svg = chain.invoke({'input': svg_prompt, **system_template_dict}).content.strip('```')
         logger.info(f'SVG: {svg}')
         try:
             drawing = svg2rlg(BytesIO(svg.encode('utf-8')))
