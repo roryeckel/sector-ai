@@ -14,10 +14,9 @@
     "ollama": {
         "url": "http://localhost:11434",
         "timeout": 200.0,
-        "headers": {
-        },
-        "disallowed_models": [
-        ]
+        "headers": {},
+        "disallowed_models": [],
+        "context_length": 2048
     },
     "system_prompts": {
         "default": "You are a Telegram chatbot created by the user ex0dus. Your username is {USERNAME} and may be mentioned in the user messages, but you don't need to mention it. You don't need to follow that format in your response, it should only be what you want to reply to the most recent message. Do not send broken links. Your should mention users of the chat by their name. Do not pretend to be anyone other than your bot self. Do not add any prefix to your message. Do not wrap your reply in quotes. Your reply is limited to {MAX_LEN} characters.",

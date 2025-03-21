@@ -31,6 +31,10 @@ class SectorContext(CallbackContext):
         return self.bot_config.get('ollama', {}).get('headers', {})
     
     @property
+    def config_ollama_context_length(self) -> int | None:
+        return self.bot_config['ollama'].get('context_length', None)
+    
+    @property
     def config_ollama_disallowed_models(self) -> list:
         return self.bot_config['ollama']['disallowed_models']
 
@@ -196,6 +200,7 @@ class SectorContext(CallbackContext):
         result = ChatOllama(
             model=model_name or self.config_default_model,
             base_url=self.config_ollama_url,
+            num_ctx=self.config_ollama_context_length,
             client_kwargs={
                 "timeout": self.config_ollama_timeout,
                 "headers": self.config_ollama_headers
@@ -277,4 +282,3 @@ class SectorContext(CallbackContext):
         system_prompt = system_prompt or self.chat_system_prompt
         included_history = self.chat_message_history if num_history is None else self.chat_message_history[-num_history:]
         return ChatPromptTemplate.from_messages([SystemMessagePromptTemplate.from_template(template=system_prompt), *included_history])
-        
