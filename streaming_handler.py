@@ -17,17 +17,21 @@ async def handle_streaming_response(
     update_task = None
     buffer_lock = asyncio.Lock()
 
-    async def update_message(message_postfix: str = '') -> None:
+    async def update_message(message_postfix: str = '') -> bool:
         nonlocal buffer, last_update, response
         async with buffer_lock:
             if buffer:
                 response += buffer
             buffer = ''
         try:
-            await response_message.edit_text((response + message_postfix) or " ")
+            new_text = response + message_postfix
+            if new_text.strip():
+                await response_message.edit_text(new_text)
         except Exception as e:
             logger.error(f"Error updating message: {e}")
+            return False
         last_update = asyncio.get_running_loop().time()
+        return True
 
     try:
         for chunk in stream_generator:
@@ -40,7 +44,8 @@ async def handle_streaming_response(
             current_time = asyncio.get_running_loop().time()
             if current_time - last_update >= context.config_streaming_interval_sec or len(buffer) >= context.config_streaming_chunk_size:
                 if update_task:
-                    await update_task
+                    if not await update_task:
+                        break
                 update_task = asyncio.create_task(update_message(context.config_streaming_cursor or ''))
 
         if update_task:
