@@ -66,14 +66,11 @@ async def error_handler(update: Update, context: SectorContext) -> None:
 # Main function
 def main() -> None:
     parser = argparse.ArgumentParser(description='Sector AI Telegram Bot')
-    parser.add_argument("--config", type=str, help="Path to the configuration file")
+    parser.add_argument("--config", type=str, required=True, help="Path to the configuration file")
     args = parser.parse_args()
 
-    if args.config:
-        with open(args.config) as config_file:
-            config_file = json.load(config_file)
-    else:
-        config_file = json.loads(pkgutil.get_data(__name__, "default_config.json"))
+    with open(args.config) as config_file:
+        config_file = json.load(config_file)
 
     # Create the application with custom context type
     context_types = ContextTypes(context=SectorContext)

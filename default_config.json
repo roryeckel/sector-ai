@@ -1,7 +1,7 @@
 {
     "telegram_bot_token": "",
-    "default_model": "llama3.1:8b",
-    "vision_model": "llava-llama3:8b",
+    "default_model": "llama3.2-vision:11b-instruct-fp16",
+    "vision_model": "llama3.2-vision:11b-instruct-fp16",
     "default_svg_size": 250,
     "streaming": {
         "cursor": "🦙",

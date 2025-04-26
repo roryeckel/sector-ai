@@ -11,8 +11,7 @@ To download and manage the recommended models, you will need to install Ollama. 
 
 2. **Download the recommended models**:
     ```sh
-    ollama pull llama3.1:8b
-    ollama pull llava-llama3:8b
+    ollama pull llama3.2-vision:11b-instruct-fp16
     ```
 
 Make sure you have enough storage space and a stable internet connection to download these models.
@@ -21,6 +20,7 @@ Make sure you have enough storage space and a stable internet connection to down
 - Llama 3.2
 - Gemma 2
 - Qwen 2.5
+- Phi 4
 - Mistral Nemo or Small
 - Almost anything will work for the basics. However, some models aren't powerful enough for the structured output parsing involved in autoreply, decision, poll, and topic commands.
 
@@ -99,24 +99,29 @@ This project uses the `python-telegram-bot` library, with various command handle
 
 To get started with the Sector AI Telegram Bot, follow these steps:
 
-1. **Clone the repository**:
+1. **Prerequisites**:
+    - Ensure you have Python 3.8 or newer installed.
+
+2.  **Clone the repository**:
     ```sh
     git clone https://github.com/roryeckel/sector-ai.git
     cd sector-ai
     ```
 
-2. **Install dependencies**:
+3.  **Install the project and its dependencies**:
     ```sh
-    pip install -r requirements.txt
+    pip install .
     ```
+    This command installs the project.
 
-3. **Configure the bot**:
+4.  **Configure the bot**:
     - Copy the `default_config.json` to a new file outside the sector-ai directory (e.g., `config.json`).
     - Add your Telegram bot token and other configuration settings to the `config.json` file.
 
-4. **Run the bot**:
-    - Go back to the parent directory of sector-ai (```cd ..```) and run the following command to start the bot:
+5.  **Run the bot**:
+    - Go back to the parent directory of sector-ai (`cd ..`) and run the following command to start the bot:
     ```sh
-    python -m sector-ai --config config.json
+    python -m sector_ai --config config.json
     ```
+    Note: the `--config` flag is required to specify the path to your configuration file.
 ## Contributions Welcome
