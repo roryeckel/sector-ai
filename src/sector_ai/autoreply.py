@@ -1,6 +1,7 @@
 import logging
+
 from telegram import Update
-from .chat import handle_chat
+
 from .decision import make_decision
 from .sector_context import SectorContext
 

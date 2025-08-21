@@ -1,5 +1,6 @@
-from functools import wraps
 import logging
+from functools import wraps
+
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 
 from .sector_context import SectorContext
@@ -100,8 +101,7 @@ async def system_prompt_cmd(update: Update, context: SectorContext) -> None:
     new_system_prompt = update.message.text.split(maxsplit=1)
     if len(new_system_prompt) > 1:
         context.chat_system_prompt = new_system_prompt[-1]
-        await update.message.reply_text(f'Updated the system prompt.')
+        await update.message.reply_text('Updated the system prompt.')
     else:
         context.chat_system_prompt = context.config_default_system_prompt
         await update.message.reply_text('Reset the system prompt to default.')
-        

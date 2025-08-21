@@ -1,12 +1,14 @@
 import logging
 from typing import List
-from .sector_context import SectorContext
+
+from langchain.output_parsers import PydanticOutputParser
+from langchain_core.exceptions import OutputParserException
+from langchain_core.prompts import PromptTemplate
 from pydantic import BaseModel, Field
 from telegram import Update
 from telegram.constants import PollLimit
-from langchain_core.exceptions import OutputParserException
-from langchain.output_parsers import PydanticOutputParser
-from langchain_core.prompts import PromptTemplate
+
+from .sector_context import SectorContext
 
 logger = logging.getLogger(__name__)
 
@@ -31,14 +33,14 @@ async def poll_cmd(update: Update, context: SectorContext) -> None:
     logger.info(f'Poll Prompt: {poll_prompt}')
     poll_response = chain.invoke({'query': poll_prompt, **system_template_dict})
     logger.info(f'Poll Response: {poll_response}')
-    
+
     if not (PollLimit.MIN_OPTION_NUMBER <= len(poll_response.options) <= PollLimit.MAX_OPTION_NUMBER):
         logger.error(f'Poll Error: Invalid number of options: {len(poll_response.options)}')
         raise OutputParserException(f"Poll must have between {PollLimit.MIN_OPTION_NUMBER} and {PollLimit.MAX_OPTION_NUMBER} options.")
-    
+
     for option in poll_response.options:
         if len(option) > PollLimit.MAX_OPTION_LENGTH:
             logger.error(f'Poll Error: Option length exceeds limit: {option}')
             raise OutputParserException(f"Each option must be less than {PollLimit.MAX_OPTION_LENGTH} characters.")
-        
+
     await update.message.reply_poll(poll_response.question, poll_response.options, is_anonymous=False)

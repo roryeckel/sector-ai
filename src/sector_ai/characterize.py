@@ -1,7 +1,9 @@
 import logging
-from .sector_context import SectorContext
-from telegram import Update
+
 from langchain_core.prompts import PromptTemplate
+from telegram import Update
+
+from .sector_context import SectorContext
 
 logger = logging.getLogger(__name__)
 

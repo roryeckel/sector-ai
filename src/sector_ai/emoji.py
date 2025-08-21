@@ -1,8 +1,10 @@
 import logging
-from .sector_context import SectorContext
+
+from langchain_core.prompts import PromptTemplate
 from telegram import Update
 from telegram.constants import MessageLimit
-from langchain_core.prompts import PromptTemplate
+
+from .sector_context import SectorContext
 
 logger = logging.getLogger(__name__)
 

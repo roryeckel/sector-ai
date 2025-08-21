@@ -1,7 +1,6 @@
 from telegram import Update
 
 from .chat import handle_chat
-
 from .sector_context import SectorContext
 
 

@@ -1,11 +1,11 @@
-import logging
 import base64
+import logging
+
+from langchain_core.messages import AIMessage, HumanMessage
 from telegram import Update
-from langchain_core.messages import HumanMessage
-from .streaming_handler import handle_streaming_response
-from langchain_core.messages import AIMessage
 
 from .sector_context import SectorContext
+from .streaming_handler import handle_streaming_response
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +27,7 @@ async def handle_vision(update: Update, context: SectorContext) -> None:
         if photo.file_size > 10 * 1024 * 1024:  # 10 megabytes
             await update.message.reply_text('One of the photos exceeds the 10MB size limit.')
             return
-        
+
     response_message = await update.message.reply_text("Processing...")
 
     photo_files = [await photo.get_file(read_timeout=30, connect_timeout=30) for photo in [update.message.photo[-1]]]
