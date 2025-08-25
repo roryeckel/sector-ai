@@ -1,12 +1,13 @@
 import logging
-from .sector_context import SectorContext
+from io import BytesIO
+
+from langchain_core.prompts import PromptTemplate
+from reportlab.graphics import renderPM
+from svglib.svglib import svg2rlg
 from telegram import Update
 from telegram.error import BadRequest
-from langchain_core.prompts import PromptTemplate
-from svglib.svglib import svg2rlg
-from reportlab.graphics import renderPM
-from io import BytesIO
-from telegram.error import BadRequest
+
+from .sector_context import SectorContext
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +30,7 @@ async def code_cmd(update: Update, context: SectorContext) -> None:
             await update.message.reply_markdown_v2(code)
             return
         except BadRequest as e:
-            logger.exception(f'Code Error', exc_info=e)
+            logger.exception('Code Error', exc_info=e)
             logger.exception(f'The code was: {code}')
             continue
     await update.message.reply_text('Failed to generate valid code snippet.')
@@ -56,7 +57,7 @@ async def html_cmd(update: Update, context: SectorContext) -> None:
                 document=BytesIO(html.encode('utf-8')))
             return
         except BadRequest as e:
-            logger.exception(f'HTML Error', exc_info=e)
+            logger.exception('HTML Error', exc_info=e)
             logger.exception(f'The HTML was: {html}')
             continue
     await update.message.reply_text('Failed to generate valid HTML snippet.')
@@ -91,7 +92,7 @@ async def svg_cmd(update: Update, context: SectorContext) -> None:
             await update.message.reply_photo(photo=png_file)
             return
         except Exception as e:
-            logger.exception(f'SVG Error', exc_info=e)
+            logger.exception('SVG Error', exc_info=e)
             logger.exception(f'The SVG was: {svg}')
             continue
     await update.message.reply_text('Failed to generate valid SVG snippet.')

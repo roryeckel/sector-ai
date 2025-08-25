@@ -1,10 +1,12 @@
 import logging
-from .sector_context import SectorContext
+
+from langchain.output_parsers import PydanticOutputParser
+from langchain_core.exceptions import OutputParserException
+from langchain_core.prompts import PromptTemplate
 from pydantic import BaseModel, Field
 from telegram import Update
-from langchain_core.exceptions import OutputParserException
-from langchain.output_parsers import PydanticOutputParser
-from langchain_core.prompts import PromptTemplate
+
+from .sector_context import SectorContext
 
 logger = logging.getLogger(__name__)
 

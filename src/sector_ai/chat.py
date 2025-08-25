@@ -1,8 +1,10 @@
 import logging
-from .sector_context import SectorContext
-from telegram import Update
-from .streaming_handler import handle_streaming_response
+
 from langchain_core.messages import AIMessage
+from telegram import Update
+
+from .sector_context import SectorContext
+from .streaming_handler import handle_streaming_response
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +25,7 @@ async def handle_chat(update: Update, context: SectorContext, system_prompt: str
         )
 
         if response.startswith('AI:'):
-            logger.warning(f'Removing AI Prefix from response')
+            logger.warning('Removing AI Prefix from response')
             response = response[3:].strip()
 
         if save_ai_message and response:

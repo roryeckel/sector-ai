@@ -1,11 +1,13 @@
 import logging
 from typing import List
-from .sector_context import SectorContext
+
+from langchain.output_parsers import PydanticOutputParser
+from langchain_core.exceptions import OutputParserException
 from pydantic import BaseModel, Field
 from telegram import Update
 from telegram.constants import PollLimit
-from langchain.output_parsers import PydanticOutputParser
-from langchain_core.exceptions import OutputParserException
+
+from .sector_context import SectorContext
 
 logger = logging.getLogger(__name__)
 
@@ -27,10 +29,10 @@ async def topic_poll_cmd(update: Update, context: SectorContext) -> None:
     if not (PollLimit.MIN_OPTION_NUMBER <= len(poll_response.topics) <= PollLimit.MAX_OPTION_NUMBER):
         logger.error(f'Poll Error: Invalid number of topics: {len(poll_response.topics)}')
         raise OutputParserException(f"Poll must have between {PollLimit.MIN_OPTION_NUMBER} and {PollLimit.MAX_OPTION_NUMBER} topics.")
-    
+
     for topic in poll_response.topics:
         if len(topic) > PollLimit.MAX_OPTION_LENGTH:
             logger.error(f'Poll Error: Topic length exceeds limit: {topic}')
             raise OutputParserException(f"Each topic must be less than {PollLimit.MAX_OPTION_LENGTH} characters.")
-    
+
     await update.message.reply_poll(poll_response.title or "Topics", poll_response.topics, is_anonymous=False)

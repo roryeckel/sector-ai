@@ -13,13 +13,19 @@ readme = "README.md"
 requires-python = ">=3.8"
 license = { file = "LICENSE" }
 dependencies = [
-    "langchain==0.3.24",
-    "langchain-ollama==0.3.2",
-    "python-telegram-bot==22.0",
+    "langchain==0.3.27",
+    "langchain-ollama==0.3.6",
+    "python-telegram-bot==22.3",
     "svglib==1.5.1",
-    "reportlab==4.4.0",
-    "pydantic==2.11.3",
-    "requests==2.32.3"
+    "reportlab==4.4.3",
+    "pydantic==2.11.7",
+    "requests==2.32.5"
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff==0.12.9",
+    "pytest==8.4.1"
 ]
 
 [project.urls]
@@ -28,3 +34,17 @@ Issues = "https://github.com/roryeckel/sector-ai/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py38"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = ["E501"]  # Line too long - many existing lines exceed 100 chars
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]

@@ -1,27 +1,27 @@
+import argparse
 import json
 import logging
 import warnings
-import pkgutil
+from datetime import UTC, datetime, timedelta
 
-from .vision import handle_vision
-from .autoreply import autoreply_cmd, should_respond
-from .chat import handle_chat, chat_cmd
-from .poll import poll_cmd
-from .topic import topic_poll_cmd
-from .emoji import emoji_cmd
-from .decision import decide_cmd
-from .sector_context import SectorContext
-from .coding import code_cmd, html_cmd, svg_cmd
-from .characterize import characterize_cmd
-from .summarize import summarize_cmd
-from .admin import model_callback, models_cmd, system_prompt_cmd, clear_cmd, temperature_cmd
-from .tokens import tokens_cmd
-import argparse
-from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
-from telegram.error import BadRequest
 from langchain_core.messages import AIMessage
-from datetime import datetime, timedelta, UTC
+from telegram import Update
+from telegram.error import BadRequest
+from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
+
+from .admin import clear_cmd, model_callback, models_cmd, system_prompt_cmd, temperature_cmd
+from .autoreply import autoreply_cmd, should_respond
+from .characterize import characterize_cmd
+from .chat import chat_cmd, handle_chat
+from .coding import code_cmd, html_cmd, svg_cmd
+from .decision import decide_cmd
+from .emoji import emoji_cmd
+from .poll import poll_cmd
+from .sector_context import SectorContext
+from .summarize import summarize_cmd
+from .tokens import tokens_cmd
+from .topic import topic_poll_cmd
+from .vision import handle_vision
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 
@@ -47,7 +47,7 @@ async def handle_message(update: Update, context: SectorContext) -> None:
     elif await should_respond(update, context):
         if datetime.now(UTC) - update.effective_message.date < timedelta(minutes=2):
             await handle_chat(update, context)
-        
+
 
 # Error handler
 async def error_handler(update: Update, context: SectorContext) -> None:
