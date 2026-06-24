@@ -90,6 +90,22 @@ class SectorContext(CallbackContext):
     def config_vision_system_prompt(self) -> str:
         return self.bot_config["system_prompts"]["vision"]
 
+    @property
+    def config_mood_system_prompt(self) -> str:
+        return self.bot_config["system_prompts"]["mood"]
+
+    @property
+    def config_roast_system_prompt(self) -> str:
+        return self.bot_config["system_prompts"]["roast"]
+
+    @property
+    def config_hype_system_prompt(self) -> str:
+        return self.bot_config["system_prompts"]["hype"]
+
+    @property
+    def config_quiz_system_prompt(self) -> str:
+        return self.bot_config["system_prompts"]["quiz"]
+
     # Streaming Config
 
     @property

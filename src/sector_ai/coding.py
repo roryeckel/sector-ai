@@ -25,7 +25,7 @@ async def code_cmd(update: Update, context: SectorContext) -> None:
     code_prompt = code_prompt[-1]
     logger.info(f"Code Prompt: {code_prompt}")
     for i in range(3):
-        code = chain.invoke({"input": code_prompt, **system_template_dict}).content
+        code = (await chain.ainvoke({"input": code_prompt, **system_template_dict})).content
         logger.info(f"Code: {code}")
         try:
             await update.message.reply_markdown_v2(code)
@@ -50,7 +50,7 @@ async def html_cmd(update: Update, context: SectorContext) -> None:
     html_prompt = html_prompt[-1]
     logger.info(f"HTML Prompt: {html_prompt}")
     for i in range(3):
-        html = chain.invoke({"input": html_prompt, **system_template_dict}).content
+        html = (await chain.ainvoke({"input": html_prompt, **system_template_dict})).content
         logger.info(f"HTML: {html}")
         try:
             await update.message.reply_document(
@@ -77,7 +77,7 @@ async def svg_cmd(update: Update, context: SectorContext) -> None:
     svg_prompt = svg_prompt[-1]
     logger.info(f"SVG Prompt: {svg_prompt}")
     for i in range(3):
-        svg = chain.invoke({"input": svg_prompt, **system_template_dict}).content.strip("```")
+        svg = (await chain.ainvoke({"input": svg_prompt, **system_template_dict})).content.strip("```")
         logger.info(f"SVG: {svg}")
         try:
             drawing = svg2rlg(BytesIO(svg.encode("utf-8")))

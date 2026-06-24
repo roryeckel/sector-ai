@@ -50,7 +50,7 @@ async def handle_vision(update: Update, context: SectorContext) -> None:
             )
         ]
 
-        stream_generator = context.bot_ollama.stream(messages)
+        stream_generator = context.bot_ollama.astream(messages)
         response = await handle_streaming_response(context, response_message, stream_generator, "Vision")
 
         if response:

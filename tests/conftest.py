@@ -31,9 +31,11 @@ def mock_context(sample_config):
     type(ctx).config_decide_system_prompt = PropertyMock(return_value=sample_config["system_prompts"]["decide"])
     type(ctx).config_ollama_url = PropertyMock(return_value=sample_config["ollama"]["url"])
     type(ctx).config_ollama_headers = PropertyMock(return_value=sample_config["ollama"].get("headers", {}))
-    type(ctx).config_basic_poll_system_prompt = PropertyMock(
-        return_value=sample_config["system_prompts"]["basic_poll"]
-    )
+    type(ctx).config_basic_poll_system_prompt = PropertyMock(return_value=sample_config["system_prompts"]["basic_poll"])
+    type(ctx).config_mood_system_prompt = PropertyMock(return_value=sample_config["system_prompts"]["mood"])
+    type(ctx).config_roast_system_prompt = PropertyMock(return_value=sample_config["system_prompts"]["roast"])
+    type(ctx).config_hype_system_prompt = PropertyMock(return_value=sample_config["system_prompts"]["hype"])
+    type(ctx).config_quiz_system_prompt = PropertyMock(return_value=sample_config["system_prompts"]["quiz"])
 
     # Chat properties backed by chat_data
     type(ctx).chat_message_history = PropertyMock(return_value=chat_data["message_history"])

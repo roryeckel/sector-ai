@@ -26,7 +26,7 @@ async def topic_poll_cmd(update: Update, context: SectorContext) -> None:
     parser = PydanticOutputParser(pydantic_object=TopicPoll)
     prompt_template = context.get_templated_messages(system_prompt=context.config_topic_poll_system_prompt)
     chain = prompt_template | context.bot_ollama | parser
-    poll_response = chain.invoke({"format_instructions": parser.get_format_instructions(), **system_template_dict})
+    poll_response = await chain.ainvoke({"format_instructions": parser.get_format_instructions(), **system_template_dict})
     logger.info(f"Topic Poll Response: {poll_response}")
     context.bot_ollama.format = ""
 

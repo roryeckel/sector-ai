@@ -29,7 +29,7 @@ async def make_decision(prompt: str, context: SectorContext, partial_variables=N
     chain = template | context.bot_ollama | parser
     logger.info(f"Decide Prompt: {prompt}")
     try:
-        decision = chain.invoke({"input": prompt, **system_template_dict})
+        decision = await chain.ainvoke({"input": prompt, **system_template_dict})
         logger.info(f"Decision: {decision.result}")
         return decision.result
     except OutputParserException as e:

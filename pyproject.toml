@@ -36,6 +36,9 @@ Issues = "https://github.com/roryeckel/sector-ai/issues"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+sector_ai = ["default_config.json"]
+
 [tool.ruff]
 line-length = 120
 target-version = "py310"

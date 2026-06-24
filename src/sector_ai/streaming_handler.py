@@ -13,20 +13,22 @@ async def handle_streaming_response(
 ) -> str:
     response = ""
     buffer = ""
+    last_sent_text = ""
     last_update = asyncio.get_running_loop().time()
     update_task = None
     buffer_lock = asyncio.Lock()
 
     async def update_message(message_postfix: str = "") -> bool:
-        nonlocal buffer, last_update, response
+        nonlocal buffer, last_update, response, last_sent_text
         async with buffer_lock:
             if buffer:
                 response += buffer
             buffer = ""
         try:
             new_text = response + message_postfix
-            if new_text.strip():
+            if new_text.strip() and new_text != last_sent_text:
                 await response_message.edit_text(new_text)
+                last_sent_text = new_text
         except Exception as e:
             logger.error(f"Error updating message: {e}")
             return False
@@ -34,7 +36,7 @@ async def handle_streaming_response(
         return True
 
     try:
-        for chunk in stream_generator:
+        async for chunk in stream_generator:
             if not chunk:
                 break
 

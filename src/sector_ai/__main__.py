@@ -1,7 +1,9 @@
 import argparse
+import copy
 import json
 import logging
 import warnings
+from importlib import resources
 from datetime import UTC, datetime, timedelta
 
 from langchain_core.messages import AIMessage
@@ -16,7 +18,10 @@ from .chat import chat_cmd, handle_chat
 from .coding import code_cmd, html_cmd, svg_cmd
 from .decision import decide_cmd
 from .emoji import emoji_cmd
+from .mood import mood_cmd
 from .poll import poll_cmd
+from .quiz import next_cmd, quiz_answer_callback, quiz_cmd
+from .roast import hype_cmd, roast_cmd
 from .sector_context import SectorContext
 from .summarize import summarize_cmd
 from .tokens import tokens_cmd
@@ -73,8 +78,24 @@ def main() -> None:
     parser.add_argument("--config", type=str, required=True, help="Path to the configuration file")
     args = parser.parse_args()
 
+    # Load default config and merge user config on top
+    default_config_text = resources.files("sector_ai").joinpath("default_config.json").read_text()
+    default_config = json.loads(default_config_text)
+
     with open(args.config) as config_file:
-        config_file = json.load(config_file)
+        user_config = json.load(config_file)
+
+    def _deep_merge(base: dict, override: dict) -> dict:
+        """Merge override into base, filling in missing keys from base."""
+        merged = copy.deepcopy(base)
+        for key, value in override.items():
+            if key in merged and isinstance(merged[key], dict) and isinstance(value, dict):
+                merged[key] = _deep_merge(merged[key], value)
+            else:
+                merged[key] = value
+        return merged
+
+    config_file = _deep_merge(default_config, user_config)
 
     # Create the application with custom context type
     context_types = ContextTypes(context=SectorContext)
@@ -97,9 +118,15 @@ def main() -> None:
     application.add_handler(CommandHandler("characterize", characterize_cmd))
     application.add_handler(CommandHandler("temperature", temperature_cmd))
     application.add_handler(CommandHandler("models", models_cmd))
-    application.add_handler(CallbackQueryHandler(model_callback))
+    application.add_handler(CallbackQueryHandler(model_callback, pattern="^model:"))
     application.add_handler(CommandHandler("tokens", tokens_cmd))
     application.add_handler(CommandHandler("autoreply", autoreply_cmd))
+    application.add_handler(CommandHandler("mood", mood_cmd))
+    application.add_handler(CommandHandler("roast", roast_cmd))
+    application.add_handler(CommandHandler("hype", hype_cmd))
+    application.add_handler(CommandHandler("quiz", quiz_cmd))
+    application.add_handler(CommandHandler("next", next_cmd))
+    application.add_handler(CallbackQueryHandler(quiz_answer_callback, pattern="^quiz:"))
 
     # Add message handler
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
