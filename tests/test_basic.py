@@ -73,10 +73,10 @@ def test_package_versions():
     assert hasattr(requests, "__version__")
 
     # Verify we're using updated versions (not exact since they may be higher)
-    assert version.parse(langchain.__version__) >= version.parse("1.2.10")
+    assert version.parse(langchain.__version__) >= version.parse("1.3.9")
     assert version.parse(telegram.__version__) >= version.parse("22.6")
     assert version.parse(pydantic.__version__) >= version.parse("2.12.5")
-    assert version.parse(requests.__version__) >= version.parse("2.32.5")
+    assert version.parse(requests.__version__) >= version.parse("2.33.1")
 
 
 def test_core_module_imports():
