@@ -33,14 +33,30 @@ class SlowModel(BaseChatModel):
         return ChatResult(generations=[ChatGeneration(message=AIMessage(content="slow answer"))])
 
 
-async def count_ticks(duration: float) -> int:
+async def count_ticks(duration: float, started: asyncio.Event | None = None) -> int:
     ticks = 0
     loop = asyncio.get_running_loop()
     deadline = loop.time() + duration
+    if started is not None:
+        started.set()
     while loop.time() < deadline:
         ticks += 1
         await asyncio.sleep(TICK)
     return ticks
+
+
+async def start_ticker(duration: float) -> tuple[asyncio.Task, asyncio.Event]:
+    """Start the ticker and wait until its deadline exists.
+
+    Without the wait the task is only *scheduled*: a handler that blocks on its
+    first call would finish before the ticker ever runs, and the ticker would
+    then measure a quiet loop and pass. Seeing the event means the clock is
+    already running before the code under test is called.
+    """
+    started = asyncio.Event()
+    task = asyncio.create_task(count_ticks(duration, started))
+    await started.wait()
+    return task, started
 
 
 async def test_handle_chat_does_not_block_the_event_loop(make_context, make_update, make_settings):
@@ -48,7 +64,7 @@ async def test_handle_chat_does_not_block_the_event_loop(make_context, make_upda
     context = make_context(model=SlowModel(), settings=settings)
     update = make_update(text="/chat hi")
 
-    ticker = asyncio.create_task(count_ticks(0.25))
+    ticker, _ = await start_ticker(0.25)
     await handle_chat(update, context)
     ticks = await ticker
 
@@ -66,7 +82,7 @@ async def test_models_cmd_does_not_block_the_event_loop(make_context, make_updat
     monkeypatch.setattr(context, "get_models", slow_get_models)
     update = make_update(text="/models", username="ex0dus")
 
-    ticker = asyncio.create_task(count_ticks(0.25))
+    ticker, _ = await start_ticker(0.25)
     await models_cmd(update, context)
     ticks = await ticker
 
