@@ -18,6 +18,7 @@ from .chat import chat_cmd, handle_chat
 from .coding import code_cmd, html_cmd, svg_cmd
 from .decision import decide_cmd
 from .emoji import emoji_cmd
+from .logging_utils import configure_logging
 from .poll import poll_cmd
 from .sector_context import SectorContext
 from .settings import LOG_LEVELS, Settings
@@ -112,10 +113,7 @@ def main(argv: list[str] | None = None) -> None:
         parser.exit(2, f"{parser.prog}: {error}\n")
 
     warnings.filterwarnings("ignore", category=FutureWarning)
-    logging.basicConfig(
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-        level=settings.log_level,
-    )
+    configure_logging(settings)
 
     # Create the application with custom context type
     context_types = ContextTypes(context=SectorContext)
