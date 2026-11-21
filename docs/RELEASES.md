@@ -87,6 +87,18 @@ These are settings, not files:
    dispatch `ci.yml` at the release branch. The draft stage re-runs the suite
    itself, so the missing CI run is covered either way.
 
+### Why PyPI has an environment and the image workflow does not
+
+`release-publish.yml` runs in the `pypi` environment because the environment
+name is part of the OIDC claim PyPI verifies: it narrows *who may upload*, not
+just whether a GitHub-side gate fired. `docker-image.yml` authenticates with
+`GITHUB_TOKEN` and `packages: write`, and has no OIDC claim for an environment
+to constrain. It also runs on every `master` push for `edge`, and
+`environment:` cannot be made conditional per trigger, so a gate there would
+pause ordinary pushes too. Revisit this if keyless image signing
+(cosign/Sigstore) is added, where the environment name becomes part of the
+signing identity.
+
 ## First release
 
 If `v1.3.0` was never tagged, start at the version that contains these changes
