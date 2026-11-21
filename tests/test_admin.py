@@ -76,11 +76,11 @@ async def test_clear_cmd_resets_state(mock_update, mock_context):
 
 async def test_models_cmd_builds_keyboard(make_context, make_update, monkeypatch):
     context = make_context("unused")
-    monkeypatch.setattr(
-        context,
-        "get_models",
-        lambda: [{"model": "a:latest", "label": "✅ a:latest"}, {"model": "b:latest", "label": "b:latest"}],
-    )
+
+    async def get_models():
+        return [{"model": "a:latest", "label": "✅ a:latest"}, {"model": "b:latest", "label": "b:latest"}]
+
+    monkeypatch.setattr(context, "get_models", get_models)
     update = make_update(text="/models", username="ex0dus")
 
     await models_cmd(update, context)
@@ -95,18 +95,18 @@ async def test_model_callback_loads_and_reports_details(make_context, make_updat
     context = make_context("unused")
     loaded = []
     monkeypatch.setattr(context, "load_model", lambda name=None: loaded.append(name))
-    monkeypatch.setattr(
-        context,
-        "get_model_details",
-        lambda: {
+
+    async def get_model_details():
+        return {
             "details": {"families": ["llama"], "parameter_size": "7B", "quantization_level": "Q4_K_M"},
             "model_info": {
                 "general.finetune": "chat",
                 "general.languages": ["en", "de"],
                 "general.tags": ["text-generation"],
             },
-        },
-    )
+        }
+
+    monkeypatch.setattr(context, "get_model_details", get_model_details)
     update = make_update(text="/models", username="ex0dus", callback_data="llama3:latest")
 
     await model_callback(update, context)

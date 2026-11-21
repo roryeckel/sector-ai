@@ -36,7 +36,7 @@ async def poll_cmd(update: Update, context: SectorContext) -> None:
         return
     poll_prompt = poll_prompt[-1]
     logger.info(f"Poll Prompt: {poll_prompt}")
-    poll_response = chain.invoke({"query": poll_prompt, **system_template_dict})
+    poll_response = await chain.ainvoke({"query": poll_prompt, **system_template_dict})
     logger.info(f"Poll Response: {poll_response}")
 
     if not (PollLimit.MIN_OPTION_NUMBER <= len(poll_response.options) <= PollLimit.MAX_OPTION_NUMBER):

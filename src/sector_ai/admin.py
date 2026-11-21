@@ -43,7 +43,7 @@ async def clear_cmd(update: Update, context: SectorContext) -> None:
 
 @admin_only
 async def models_cmd(update: Update, context: SectorContext) -> None:
-    models = context.get_models()
+    models = await context.get_models()
     keyboard = [[InlineKeyboardButton(model["label"], callback_data=model["model"])] for model in models]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text("Available models:", reply_markup=reply_markup)
@@ -54,7 +54,7 @@ async def model_callback(update: Update, context: SectorContext) -> None:
     query = update.callback_query
     model_name = query.data
     context.load_model(model_name)
-    model_details = context.get_model_details()
+    model_details = await context.get_model_details()
     model_details_details = model_details.get("details", {})
     model_info = model_details.get("model_info", {})
     await query.answer()

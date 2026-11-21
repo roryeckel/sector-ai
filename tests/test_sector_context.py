@@ -1,9 +1,11 @@
 """Tests for SectorContext core state management."""
 
+import json
 from collections import deque
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import httpx
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from telegram.constants import MessageLimit
 
@@ -24,6 +26,17 @@ def _make_message(text, username="testuser"):
     msg.text = text
     msg.from_user.username = username
     return msg
+
+
+def _client_with(handler):
+    """Point SectorContext's ``AsyncClient`` at a mock transport instead of the network."""
+    real_client = httpx.AsyncClient
+
+    def factory(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(handler)
+        return real_client(*args, **kwargs)
+
+    return patch("sector_ai.sector_context.httpx.AsyncClient", side_effect=factory)
 
 
 def test_save_plain_text():
@@ -92,27 +105,28 @@ def test_exists_no_match():
 # --- settings plumbing ---
 
 
-def test_ollama_url_comes_from_settings(make_context, make_settings):
+async def test_ollama_url_comes_from_settings(make_context, make_settings):
     context = make_context(settings=make_settings(ollama_url="http://custom:1234"))
+    seen = []
 
-    with patch("sector_ai.sector_context.requests.post", return_value=MagicMock(ok=False)) as post:
-        context.get_model_details()
+    def handler(request):
+        seen.append(str(request.url))
+        return httpx.Response(404)
 
-    assert post.call_args.args[0] == "http://custom:1234/api/show"
+    with _client_with(handler):
+        await context.get_model_details()
+
+    assert seen == ["http://custom:1234/api/show"]
 
 
 # --- get_model_details ---
 
 
-def test_get_model_details_strips_fields():
-    mock_self = MagicMock()
-    mock_self.get_model.return_value = "test-model"
-    mock_self.settings.ollama_url = "http://localhost:11434"
-    mock_self.settings.ollama_headers = {}
+async def test_get_model_details_strips_fields(make_context):
+    context = make_context("unused")
+    context.bot_ollama.model = "test-model"
 
-    fake_response = MagicMock()
-    fake_response.ok = True
-    fake_response.json.return_value = {
+    payload = {
         "license": "MIT",
         "modelfile": "FROM ...",
         "parameters": "num_ctx 2048",
@@ -120,11 +134,17 @@ def test_get_model_details_strips_fields():
         "details": {"family": "llama", "parameter_size": "7B"},
         "model_info": {"general.architecture": "llama"},
     }
+    asked = []
 
-    with patch("sector_ai.sector_context.requests.post", return_value=fake_response):
-        result = SectorContext.get_model_details(mock_self)
+    def handler(request):
+        asked.append(json.loads(request.content)["name"])
+        return httpx.Response(200, json=payload)
 
-    assert "details" in result
+    with _client_with(handler):
+        result = await context.get_model_details()
+
+    assert asked == ["test-model"]
+    assert result["details"] == {"family": "llama", "parameter_size": "7B"}
     assert "model_info" in result
     assert "license" not in result
     assert "modelfile" not in result
@@ -221,30 +241,28 @@ def test_load_model_passes_ollama_options(make_context):
     }
 
 
-def test_get_models_filters_disallowed_and_labels(make_context):
+async def test_get_models_filters_disallowed_and_labels(make_context):
     context = make_context("unused")
     context.bot_ollama.model = context.settings.default_model
     context.settings.ollama_disallowed_models = ["blocked:latest"]
 
-    tags = MagicMock(
-        ok=True,
-        json=MagicMock(
-            return_value={
-                "models": [
-                    {"model": context.settings.default_model},
-                    {"model": "other:latest"},
-                    {"model": "blocked:latest"},
-                ]
-            }
-        ),
-    )
-    show = MagicMock(ok=True, json=MagicMock(return_value={"details": {"family": "llama"}}))
+    def handler(request):
+        if request.url.path == "/api/tags":
+            return httpx.Response(
+                200,
+                json={
+                    "models": [
+                        {"model": context.settings.default_model},
+                        {"model": "other:latest"},
+                        {"model": "blocked:latest"},
+                    ]
+                },
+            )
+        name = json.loads(request.content)["name"]
+        return httpx.Response(200, json={"details": {"family": "llama"}, "name": name})
 
-    with (
-        patch("sector_ai.sector_context.requests.get", return_value=tags),
-        patch("sector_ai.sector_context.requests.post", return_value=show),
-    ):
-        models = context.get_models()
+    with _client_with(handler):
+        models = await context.get_models()
 
     names = [model["model"] for model in models]
     assert "blocked:latest" not in names
@@ -252,7 +270,30 @@ def test_get_models_filters_disallowed_and_labels(make_context):
     default = next(model for model in models if model["model"] == context.settings.default_model)
     assert default["is_default_active"] is True
     assert default["is_vision_active"] is True
+    assert default["details"] == {"family": "llama"}
     assert default["label"].startswith("✅")
+
+
+async def test_get_models_survives_a_failed_metadata_lookup(make_context, caplog):
+    context = make_context("unused")
+    context.bot_ollama.model = "good:latest"
+
+    def handler(request):
+        if request.url.path == "/api/tags":
+            return httpx.Response(200, json={"models": [{"model": "good:latest"}, {"model": "slow:latest"}]})
+        if json.loads(request.content)["name"] == "slow:latest":
+            raise httpx.ReadTimeout("too slow", request=request)
+        return httpx.Response(200, json={"details": {"family": "llama"}})
+
+    with _client_with(handler), caplog.at_level("WARNING"):
+        models = await context.get_models()
+
+    # The slow model still appears, just without the metadata the others have.
+    assert [model["model"] for model in models] == ["good:latest", "slow:latest"]
+    assert models[0]["details"] == {"family": "llama"}
+    assert "details" not in models[1]
+    assert models[1]["label"] == "slow:latest"
+    assert "slow:latest" in caplog.text
 
 
 def test_settings_setter_updates_bot_data(make_context, make_settings):
@@ -306,15 +347,15 @@ async def test_get_username_is_cached(make_context):
     assert len(calls) == 1
 
 
-def test_get_model_details_returns_empty_on_failure(make_context):
+async def test_get_model_details_returns_empty_on_failure(make_context):
     context = make_context("unused")
 
-    with patch("sector_ai.sector_context.requests.post", return_value=MagicMock(ok=False)):
-        assert context.get_model_details() == {}
+    with _client_with(lambda request: httpx.Response(500)):
+        assert await context.get_model_details() == {}
 
 
-def test_get_models_returns_empty_on_failure(make_context):
+async def test_get_models_returns_empty_on_failure(make_context):
     context = make_context("unused")
 
-    with patch("sector_ai.sector_context.requests.get", return_value=MagicMock(ok=False)):
-        assert context.get_models() == []
+    with _client_with(lambda request: httpx.Response(500)):
+        assert await context.get_models() == []
