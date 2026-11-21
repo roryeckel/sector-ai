@@ -18,13 +18,13 @@ def test_sector_ai_imports():
 
 def test_key_dependencies_import():
     """Test that key dependencies can be imported."""
-    # Test langchain import
+    # Test langchain-core import
     try:
-        import langchain
+        import langchain_core
 
-        assert langchain is not None
+        assert langchain_core is not None
     except ImportError as e:
-        pytest.fail(f"Failed to import langchain: {e}")
+        pytest.fail(f"Failed to import langchain_core: {e}")
 
     # Test langchain-ollama import
     try:
@@ -61,22 +61,22 @@ def test_key_dependencies_import():
 
 def test_package_versions():
     """Test that package versions are as expected."""
-    import langchain
+    import langchain_core
     import pydantic
     import requests
     import telegram
 
     # Check that we have the updated versions
-    assert hasattr(langchain, "__version__")
+    assert hasattr(langchain_core, "__version__")
     assert hasattr(telegram, "__version__")
     assert hasattr(pydantic, "__version__")
     assert hasattr(requests, "__version__")
 
     # Verify we're using updated versions (not exact since they may be higher)
-    assert version.parse(langchain.__version__) >= version.parse("1.3.9")
-    assert version.parse(telegram.__version__) >= version.parse("22.6")
-    assert version.parse(pydantic.__version__) >= version.parse("2.12.5")
-    assert version.parse(requests.__version__) >= version.parse("2.33.1")
+    assert version.parse(langchain_core.__version__) >= version.parse("1.8.4")
+    assert version.parse(telegram.__version__) >= version.parse("22.8")
+    assert version.parse(pydantic.__version__) >= version.parse("2.14.4")
+    assert version.parse(requests.__version__) >= version.parse("2.34.2")
 
 
 def test_core_module_imports():

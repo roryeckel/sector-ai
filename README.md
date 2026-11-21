@@ -100,7 +100,7 @@ This project uses the `python-telegram-bot` library, with various command handle
 To get started with the Sector AI Telegram Bot, follow these steps:
 
 1. **Prerequisites**:
-    - Ensure you have Python 3.8 or newer installed.
+    - Ensure you have Python 3.11 or newer installed.
 
 2.  **Clone the repository**:
     ```sh
