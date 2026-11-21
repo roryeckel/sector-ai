@@ -27,11 +27,6 @@ on:
         required: false
         default: ""
         type: string
-      draft:
-        description: "Create as a draft release"
-        required: false
-        default: true
-        type: boolean
 
 permissions:
   contents: write
@@ -61,7 +56,6 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           INPUT_VERSION: ${{ inputs.version }}
           INPUT_REF: ${{ inputs.target_ref }}
-          INPUT_DRAFT: ${{ inputs.draft }}
           PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
           PR_MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
         run: |
@@ -69,7 +63,6 @@ jobs:
           if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
             VERSION="$INPUT_VERSION"
             REF="$INPUT_REF"
-            DRAFT="$INPUT_DRAFT"
           else
             if [[ "$PR_HEAD_REF" != release/v* ]]; then
               echo "expected a release/v branch, got '$PR_HEAD_REF'" >&2
@@ -77,7 +70,6 @@ jobs:
             fi
             VERSION="${PR_HEAD_REF#release/v}"
             REF="$PR_MERGE_SHA"
-            DRAFT=true
           fi
           if [ -z "$REF" ] || [ "$REF" = "null" ]; then
             echo "release PR has no merge commit; refusing to release an unpinned commit" >&2
@@ -87,12 +79,7 @@ jobs:
             echo "not a release version: $VERSION" >&2
             exit 1
           fi
-          DRAFT="$(printf '%s' "${DRAFT:-true}" | tr '[:upper:]' '[:lower:]')"
-          if [ "$DRAFT" != "true" ] && [ "$DRAFT" != "false" ]; then
-            echo "draft must be true or false, got '$DRAFT'" >&2
-            exit 1
-          fi
-          printf 'version=%s\nref=%s\ndraft=%s\n' "$VERSION" "$REF" "$DRAFT" >> "$GITHUB_OUTPUT"
+          printf 'version=%s\nref=%s\n' "$VERSION" "$REF" >> "$GITHUB_OUTPUT"
 
       - uses: actions/checkout@v6
         with:
@@ -145,18 +132,17 @@ jobs:
       - name: Create or update the draft release
         env:
           VERSION: ${{ steps.meta.outputs.version }}
-          DRAFT: ${{ steps.meta.outputs.draft }}
           PREV: ${{ steps.prev.outputs.tag }}
         run: |
           set -euo pipefail
           SHA="$(git rev-parse HEAD)"
           TAG="v$VERSION"
-          FLAGS=(--target "$SHA" --title "$TAG")
+          # Always a draft: publishing is the human ship decision, and a
+          # release created by GITHUB_TOKEN would not trigger the PyPI and
+          # image workflows that listen for release.published.
+          FLAGS=(--target "$SHA" --title "$TAG" --draft)
           if [ -n "$PREV" ]; then
             FLAGS+=(--notes-start-tag "$PREV")
-          fi
-          if [ "$DRAFT" = "true" ]; then
-            FLAGS+=(--draft)
           fi
           if printf '%s' "$VERSION" | grep -qE -- '-'; then
             FLAGS+=(--prerelease)

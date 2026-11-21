@@ -82,12 +82,19 @@ def test_forward_check_accepts_a_higher_version(pyproject):
     assert run(pyproject, "forward-check", "999.0.0").returncode == 0
 
 
-def test_forward_check_rejects_the_same_or_lower_version(pyproject):
-    assert run(pyproject, "forward-check", CURRENT).returncode == 1
-
-    lower = CURRENT.rsplit(".", 1)[0] + ".0"
-    if lower != CURRENT:
-        assert run(pyproject, "forward-check", lower).returncode == 1
+@pytest.mark.parametrize(
+    ("current", "candidate"),
+    [
+        ("1.4.0", "1.4.0"),
+        ("1.4.1", "1.4.0"),
+        ("2.0.0", "1.9.9"),
+        ("1.4.0-rc.1", "1.4.0-rc.1"),
+    ],
+)
+def test_forward_check_rejects_the_same_or_lower_version(tmp_path, current, candidate):
+    """Explicit fixtures: deriving a lower version from the repo's own spelling
+    breaks while the repo sits on a prerelease."""
+    assert run(write_pyproject(tmp_path, current), "forward-check", candidate).returncode == 1
 
 
 def test_forward_check_accepts_a_prerelease_of_a_higher_version(pyproject):
