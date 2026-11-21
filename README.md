@@ -100,7 +100,7 @@ This project uses the `python-telegram-bot` library, with various command handle
 To get started with the Sector AI Telegram Bot, follow these steps:
 
 1. **Prerequisites**:
-    - Ensure you have Python 3.11 or newer installed.
+    - Ensure you have Python 3.11 or newer installed, and Ollama running (see above).
 
 2.  **Clone the repository**:
     ```sh
@@ -112,16 +112,41 @@ To get started with the Sector AI Telegram Bot, follow these steps:
     ```sh
     pip install .
     ```
-    This command installs the project.
 
 4.  **Configure the bot**:
-    - Copy the `default_config.json` to a new file outside the sector-ai directory (e.g., `config.json`).
-    - Add your Telegram bot token and other configuration settings to the `config.json` file.
+    - Copy `.env.example` to `.env` and set at least `TELEGRAM_BOT_TOKEN`.
+    - Everything has a sensible default; see [Configuration](#configuration) for the rest.
 
 5.  **Run the bot**:
-    - Go back to the parent directory of sector-ai (`cd ..`) and run the following command to start the bot:
     ```sh
-    python -m sector_ai --config config.json
+    sector-ai
     ```
-    Note: the `--config` flag is required to specify the path to your configuration file.
+    The `sector-ai` command reads `.env` from the current directory. Running `python -m sector_ai` works the same way.
+
+    Upgrading from 1.3.x: the `--config` flag and `config.json` are gone. Move the values you had changed into `.env`; `.env.example` lists every setting and its default.
+
+## Configuration
+
+There is no configuration file. Settings come from environment variables, an optional `.env` file in the working directory, or the command line (which wins over both).
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `TELEGRAM_BOT_TOKEN` | *required* | Token from [@BotFather](https://t.me/BotFather). `SECTOR_AI_TELEGRAM_BOT_TOKEN` is also accepted. |
+| `OLLAMA_URL` | `http://localhost:11434` | Ollama endpoint. `SECTOR_AI_OLLAMA_URL` is also accepted. |
+| `SECTOR_AI_DEFAULT_MODEL` | `llama3.2-vision:11b-instruct-fp16` | Model loaded at start-up. |
+| `SECTOR_AI_VISION_MODEL` | `llama3.2-vision:11b-instruct-fp16` | Model used for photos. |
+| `SECTOR_AI_ADMIN_USERNAMES` | `ex0dus` | Comma separated usernames allowed to use admin commands. |
+| `SECTOR_AI_DEFAULT_SVG_SIZE` | `250` | Base size for `/svg`; the rendered PNG is twice this. |
+| `SECTOR_AI_STREAMING_CURSOR` | `🦙` | Cursor shown while a reply streams. |
+| `SECTOR_AI_STREAMING_INTERVAL_SEC` | `0.7` | Minimum seconds between Telegram edits. |
+| `SECTOR_AI_STREAMING_CHUNK_SIZE` | `150` | Characters buffered before an edit. |
+| `SECTOR_AI_OLLAMA_TIMEOUT` | `200.0` | Request timeout in seconds. |
+| `SECTOR_AI_OLLAMA_CONTEXT_LENGTH` | `2048` | `num_ctx` passed to Ollama; set to `null` to leave it to the model. |
+| `SECTOR_AI_OLLAMA_DISALLOWED_MODELS` | *empty* | Comma separated models hidden from `/models`. |
+| `SECTOR_AI_OLLAMA_HEADERS` | `{}` | JSON object of extra HTTP headers for Ollama. |
+| `SECTOR_AI_SYSTEM_PROMPTS__<NAME>` | built-in | Override one system prompt, e.g. `SECTOR_AI_SYSTEM_PROMPTS__SVG`. |
+| `SECTOR_AI_LOG_LEVEL` | `INFO` | `CRITICAL`, `ERROR`, `WARNING`, `INFO` or `DEBUG`. |
+
+The flags worth changing per run are also on the command line: `--model`, `--vision-model`, `--ollama-url`, `--admin` (repeatable), `--log-level` and `--version`. Secrets are intentionally environment-only, so a bot token never lands in shell history or `ps` output.
+
 ## Contributions Welcome

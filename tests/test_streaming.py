@@ -1,6 +1,5 @@
 """Tests for the streaming message updater."""
 
-import copy
 from types import SimpleNamespace
 
 import pytest
@@ -9,28 +8,22 @@ from sector_ai.streaming_handler import handle_streaming_response
 
 
 @pytest.fixture
-def fast_config(sample_config):
-    config = copy.deepcopy(sample_config)
-    config["streaming"]["interval_sec"] = 0
-    config["streaming"]["chunk_size"] = 0
-    return config
+def fast_settings(make_settings):
+    return make_settings(streaming_interval_sec=0, streaming_chunk_size=0)
 
 
 @pytest.fixture
-def quiet_config(sample_config):
+def quiet_settings(make_settings):
     """Large thresholds: only the final flush touches Telegram."""
-    config = copy.deepcopy(sample_config)
-    config["streaming"]["interval_sec"] = 999
-    config["streaming"]["chunk_size"] = 999_999
-    return config
+    return make_settings(streaming_interval_sec=999, streaming_chunk_size=999_999)
 
 
 def chunks(*parts):
     return [SimpleNamespace(content=part) for part in parts]
 
 
-async def test_single_flush_when_thresholds_not_reached(make_context, recording_message, quiet_config):
-    context = make_context(config=quiet_config)
+async def test_single_flush_when_thresholds_not_reached(make_context, recording_message, quiet_settings):
+    context = make_context(settings=quiet_settings)
     message = recording_message()
 
     response = await handle_streaming_response(context, message, iter(chunks("alpha", " ", "beta")), "Chat")
@@ -39,10 +32,10 @@ async def test_single_flush_when_thresholds_not_reached(make_context, recording_
     assert message.texts("edit_text") == ["alpha beta"]
 
 
-async def test_cursor_present_during_updates_absent_at_end(make_context, recording_message, fast_config):
-    context = make_context(config=fast_config)
+async def test_cursor_present_during_updates_absent_at_end(make_context, recording_message, fast_settings):
+    context = make_context(settings=fast_settings)
     message = recording_message()
-    cursor = context.config_streaming_cursor
+    cursor = context.settings.streaming_cursor
 
     await handle_streaming_response(context, message, iter(chunks("alpha", " ", "beta")), "Chat")
 
@@ -52,9 +45,9 @@ async def test_cursor_present_during_updates_absent_at_end(make_context, recordi
     assert edits[-1] == "alpha beta"
 
 
-async def test_no_duplicate_consecutive_edits(make_context, recording_message, fast_config):
+async def test_no_duplicate_consecutive_edits(make_context, recording_message, fast_settings):
     """Regression: the trailing flush used to rewrite unchanged text."""
-    context = make_context(config=fast_config)
+    context = make_context(settings=fast_settings)
     message = recording_message()
 
     await handle_streaming_response(context, message, iter(chunks("alpha", " ", "beta")), "Chat")
@@ -77,8 +70,8 @@ async def test_generator_error_is_reported_and_returns_empty(make_context, recor
     assert "Error processing chat: boom" in message.texts("edit_text")[-1]
 
 
-async def test_edit_failure_stops_streaming_early(make_context, recording_message, fast_config):
-    context = make_context(config=fast_config)
+async def test_edit_failure_stops_streaming_early(make_context, recording_message, fast_settings):
+    context = make_context(settings=fast_settings)
     message = recording_message(fail_times=1)
 
     response = await handle_streaming_response(context, message, iter(chunks("alpha", " ", "beta")), "Chat")
@@ -99,8 +92,8 @@ async def test_falsy_chunk_ends_stream(make_context, recording_message):
     assert message.calls_to("edit_text") == []
 
 
-async def test_pending_update_cancelled_on_error(make_context, recording_message, fast_config):
-    context = make_context(config=fast_config)
+async def test_pending_update_cancelled_on_error(make_context, recording_message, fast_settings):
+    context = make_context(settings=fast_settings)
     message = recording_message()
 
     def exploding():

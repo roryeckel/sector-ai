@@ -21,8 +21,12 @@ dependencies = [
     "reportlab==5.1.0",
     "pypdfium2==5.15.2",
     "pydantic==2.14.4",
+    "pydantic-settings==2.16.3",
     "requests==2.34.2"
 ]
+
+[project.scripts]
+sector-ai = "sector_ai.__main__:main"
 
 [project.optional-dependencies]
 dev = [

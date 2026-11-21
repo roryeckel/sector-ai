@@ -9,10 +9,8 @@ Two styles are supported:
   that assert on the prompt going in and the payloads going out.
 """
 
-import json
 from collections import defaultdict, deque
 from datetime import UTC, datetime
-from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, PropertyMock
@@ -23,39 +21,46 @@ from langchain_core.messages import AIMessage
 from telegram.error import BadRequest
 
 from sector_ai.sector_context import SectorContext
+from sector_ai.settings import Settings
+
+TEST_TOKEN = "123:test-token"
 
 
 @pytest.fixture
-def sample_config():
-    config_path = Path(__file__).resolve().parent.parent / "default_config.json"
-    with open(config_path) as f:
-        return json.load(f)
+def make_settings():
+    """Build settings with test defaults.
+
+    ``_env_file=None`` keeps a developer's local ``.env`` out of the suite; the
+    precedence tests supply their own file explicitly.
+    """
+
+    def _make(**overrides) -> Settings:
+        return Settings(telegram_bot_token=TEST_TOKEN, _env_file=None, **overrides)
+
+    return _make
 
 
 @pytest.fixture
-def mock_context(sample_config):
+def sample_settings(make_settings):
+    return make_settings()
+
+
+@pytest.fixture
+def mock_context(sample_settings):
     ctx = MagicMock(spec=SectorContext)
 
     # bot_data / chat_data backing stores
-    ctx.bot_data = {"config": sample_config}
+    ctx.bot_data = {"settings": sample_settings}
+    ctx.settings = sample_settings
     chat_data = {"message_history": deque(maxlen=15), "autoreply_mode": True}
     ctx.chat_data = chat_data
-
-    # Properties that delegate to config
-    type(ctx).bot_config = PropertyMock(return_value=sample_config)
-    type(ctx).config_admin_usernames = PropertyMock(return_value=sample_config["admin_usernames"])
-    type(ctx).config_default_system_prompt = PropertyMock(return_value=sample_config["system_prompts"]["default"])
-    type(ctx).config_decide_system_prompt = PropertyMock(return_value=sample_config["system_prompts"]["decide"])
-    type(ctx).config_ollama_url = PropertyMock(return_value=sample_config["ollama"]["url"])
-    type(ctx).config_ollama_headers = PropertyMock(return_value=sample_config["ollama"].get("headers", {}))
-    type(ctx).config_basic_poll_system_prompt = PropertyMock(return_value=sample_config["system_prompts"]["basic_poll"])
 
     # Chat properties backed by chat_data
     type(ctx).chat_message_history = PropertyMock(return_value=chat_data["message_history"])
     type(ctx).chat_autoreply_mode = PropertyMock(return_value=True)
     # Don't use PropertyMock for chat_system_prompt - let MagicMock handle
     # attribute assignment naturally so tests can verify setter calls
-    ctx.chat_system_prompt = sample_config["system_prompts"]["default"]
+    ctx.chat_system_prompt = sample_settings.system_prompts.default
 
     # Async methods
     ctx.get_system_template_dict = AsyncMock(return_value={"MAX_LEN": 4096, "USERNAME": "testbot"})
@@ -267,11 +272,11 @@ def make_photo():
 # --- Real context over fake application -----------------------------------
 
 
-def make_application(config: dict, model=None, bot_id: int = 42, username: str = "testbot"):
+def make_application(settings, model=None, bot_id: int = 42, username: str = "testbot"):
     async def get_me():
         return SimpleNamespace(username=username)
 
-    bot_data = {"config": config}
+    bot_data = {"settings": settings}
     if model is not None:
         bot_data["ollama"] = model
 
@@ -286,12 +291,13 @@ def make_application(config: dict, model=None, bot_id: int = 42, username: str =
 
 
 @pytest.fixture
-def make_context(fake_model, sample_config):
-    def _make(*contents: str, model=None, config=None, chat_id=1, user_id=2, **kwargs) -> SectorContext:
-        config = config or sample_config
+def make_context(fake_model, sample_settings):
+    def _make(*contents: str, model=None, settings=None, chat_id=1, user_id=2, **kwargs) -> SectorContext:
+        if settings is None:
+            settings = sample_settings
         if model is None:
             model = fake_model(*contents, **kwargs)
-        application = make_application(config, model=model)
+        application = make_application(settings, model=model)
         return SectorContext(application, chat_id=chat_id, user_id=user_id)
 
     return _make

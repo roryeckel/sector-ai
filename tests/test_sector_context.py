@@ -89,21 +89,16 @@ def test_exists_no_match():
     assert result is False
 
 
-# --- config_ollama_url ---
+# --- settings plumbing ---
 
 
-def test_url_present():
-    mock_self = MagicMock()
-    mock_self.bot_config = {"ollama": {"url": "http://custom:1234"}}
-    result = SectorContext.config_ollama_url.fget(mock_self)
-    assert result == "http://custom:1234"
+def test_ollama_url_comes_from_settings(make_context, make_settings):
+    context = make_context(settings=make_settings(ollama_url="http://custom:1234"))
 
+    with patch("sector_ai.sector_context.requests.post", return_value=MagicMock(ok=False)) as post:
+        context.get_model_details()
 
-def test_url_fallback():
-    mock_self = MagicMock()
-    mock_self.bot_config = {"ollama": {}}
-    result = SectorContext.config_ollama_url.fget(mock_self)
-    assert result == "http://localhost:11434"
+    assert post.call_args.args[0] == "http://custom:1234/api/show"
 
 
 # --- get_model_details ---
@@ -112,8 +107,8 @@ def test_url_fallback():
 def test_get_model_details_strips_fields():
     mock_self = MagicMock()
     mock_self.get_model.return_value = "test-model"
-    mock_self.config_ollama_url = "http://localhost:11434"
-    mock_self.config_ollama_headers = {}
+    mock_self.settings.ollama_url = "http://localhost:11434"
+    mock_self.settings.ollama_headers = {}
 
     fake_response = MagicMock()
     fake_response.ok = True
@@ -162,7 +157,7 @@ def test_autoreply_defaults_on_and_persists(make_context):
 
 def test_svg_size_defaults_and_persists(make_context):
     context = make_context("unused")
-    assert context.chat_svg_size == context.config_default_svg_size
+    assert context.chat_svg_size == context.settings.default_svg_size
 
     context.chat_svg_size = 512
     assert SectorContext(context.application, chat_id=1).chat_svg_size == 512
@@ -173,7 +168,7 @@ def test_system_prompt_override_persists(make_context):
     context.chat_system_prompt = "You are a pirate."
 
     assert SectorContext(context.application, chat_id=1).chat_system_prompt == "You are a pirate."
-    assert SectorContext(context.application, chat_id=2).chat_system_prompt == context.config_default_system_prompt
+    assert SectorContext(context.application, chat_id=2).chat_system_prompt == context.settings.system_prompts.default
 
 
 async def test_system_template_dict_uses_telegram_limits(make_context):
@@ -217,26 +212,26 @@ def test_load_model_passes_ollama_options(make_context):
     assert context.bot_data["ollama"] is result
     assert chat_ollama.call_args.kwargs == {
         "model": "custom:latest",
-        "base_url": context.config_ollama_url,
-        "num_ctx": context.config_ollama_context_length,
+        "base_url": context.settings.ollama_url,
+        "num_ctx": context.settings.ollama_context_length,
         "client_kwargs": {
-            "timeout": context.config_ollama_timeout,
-            "headers": context.config_ollama_headers,
+            "timeout": context.settings.ollama_timeout,
+            "headers": context.settings.ollama_headers,
         },
     }
 
 
 def test_get_models_filters_disallowed_and_labels(make_context):
     context = make_context("unused")
-    context.bot_ollama.model = context.config_default_model
-    context.bot_data["config"]["ollama"]["disallowed_models"] = ["blocked:latest"]
+    context.bot_ollama.model = context.settings.default_model
+    context.settings.ollama_disallowed_models = ["blocked:latest"]
 
     tags = MagicMock(
         ok=True,
         json=MagicMock(
             return_value={
                 "models": [
-                    {"model": context.config_default_model},
+                    {"model": context.settings.default_model},
                     {"model": "other:latest"},
                     {"model": "blocked:latest"},
                 ]
@@ -254,19 +249,19 @@ def test_get_models_filters_disallowed_and_labels(make_context):
     names = [model["model"] for model in models]
     assert "blocked:latest" not in names
     assert len(models) == 2
-    default = next(model for model in models if model["model"] == context.config_default_model)
+    default = next(model for model in models if model["model"] == context.settings.default_model)
     assert default["is_default_active"] is True
     assert default["is_vision_active"] is True
     assert default["label"].startswith("✅")
 
 
-def test_bot_config_setter_updates_bot_data(make_context):
+def test_settings_setter_updates_bot_data(make_context, make_settings):
     context = make_context("unused")
-    new_config = {"admin_usernames": ["someone"]}
+    new_settings = make_settings(default_model="other:latest")
 
-    context.bot_config = new_config
+    context.settings = new_settings
 
-    assert context.bot_data["config"] is new_config
+    assert context.bot_data["settings"] is new_settings
 
 
 def test_chat_message_history_setter(make_context):
@@ -279,10 +274,10 @@ def test_chat_message_history_setter(make_context):
     assert context.chat_message_history.maxlen == 3
 
 
-def test_decide_autoreply_prompt_comes_from_config(make_context, sample_config):
+def test_decide_autoreply_prompt_comes_from_settings(make_context, sample_settings):
     context = make_context("unused")
 
-    assert context.config_decide_autoreply_system_prompt == sample_config["system_prompts"]["decide_autoreply"]
+    assert context.settings.system_prompts.decide_autoreply == sample_settings.system_prompts.decide_autoreply
 
 
 def test_bot_ollama_loads_lazily(make_context):

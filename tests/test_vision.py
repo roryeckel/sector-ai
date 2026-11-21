@@ -21,7 +21,7 @@ async def test_vision_streams_and_records_history(make_context, make_update, mak
 
     await handle_vision(update, context)
 
-    assert loads == [context.config_vision_model, "fake-model"]
+    assert loads == [context.settings.vision_model, "fake-model"]
     assert update.message.texts("edit_text")[-1] == "a cat on a mat"
     assert context.chat_message_history[-1].content == "a cat on a mat"
 
@@ -51,7 +51,7 @@ async def test_vision_uses_default_prompt_without_caption(
 
     await handle_vision(update, context)
 
-    assert model.received[0][0].content[0]["text"] == context.config_vision_system_prompt
+    assert model.received[0][0].content[0]["text"] == context.settings.system_prompts.vision
 
 
 async def test_vision_ignored_when_autoreply_disabled(make_context, make_update, make_photo, fake_model):

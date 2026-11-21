@@ -14,7 +14,7 @@ async def test_summarize_uses_summarization_prompt(make_context, make_update):
     await summarize_cmd(update, context)
 
     sent = context.bot_ollama.received[0]
-    expected = context.config_summarization_system_prompt.format(MAX_LEN=4096, USERNAME="testbot")
+    expected = context.settings.system_prompts.summarization.format(MAX_LEN=4096, USERNAME="testbot")
     assert isinstance(sent[0], SystemMessage)
     assert sent[0].content == expected
     assert update.message.texts("edit_text")[-1] == "a short summary"

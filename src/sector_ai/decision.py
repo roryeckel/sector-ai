@@ -22,7 +22,7 @@ async def make_decision(prompt: str, context: SectorContext, partial_variables=N
     system_template_dict = await context.get_system_template_dict()
     parser = PydanticOutputParser(pydantic_object=Decision)
     template = PromptTemplate(
-        template=context.config_decide_system_prompt,
+        template=context.settings.system_prompts.decide,
         input_variables=["input", *system_template_dict.keys(), *partial_variables.keys()],
         partial_variables={"format_instructions": parser.get_format_instructions(), **partial_variables},
     )

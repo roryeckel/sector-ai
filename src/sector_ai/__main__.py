@@ -1,14 +1,16 @@
 import argparse
-import json
 import logging
 import warnings
 from datetime import UTC, datetime, timedelta
 
 from langchain_core.messages import AIMessage
+from pydantic import ValidationError
+from pydantic_settings import SettingsError
 from telegram import Update
 from telegram.error import BadRequest
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
+from . import __version__
 from .admin import clear_cmd, model_callback, models_cmd, system_prompt_cmd, temperature_cmd
 from .autoreply import autoreply_cmd, should_respond
 from .characterize import characterize_cmd
@@ -18,15 +20,12 @@ from .decision import decide_cmd
 from .emoji import emoji_cmd
 from .poll import poll_cmd
 from .sector_context import SectorContext
+from .settings import LOG_LEVELS, Settings
 from .summarize import summarize_cmd
 from .tokens import tokens_cmd
 from .topic import topic_poll_cmd
 from .vision import handle_vision
 
-warnings.filterwarnings("ignore", category=FutureWarning)
-
-# Enable logging
-logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
@@ -67,19 +66,63 @@ async def error_handler(update: Update, context: SectorContext) -> None:
         pass
 
 
-# Main function
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Sector AI Telegram Bot")
-    parser.add_argument("--config", type=str, required=True, help="Path to the configuration file")
-    args = parser.parse_args()
+def build_parser() -> argparse.ArgumentParser:
+    """The CLI is deliberately small: only settings you would want to change per run.
 
-    with open(args.config) as config_file:
-        config_file = json.load(config_file)
+    Secrets are excluded on purpose. A bot token on the command line ends up in
+    ``ps`` output and shell history, so it is env-only.
+    """
+    parser = argparse.ArgumentParser(prog="sector-ai", description="Sector AI Telegram Bot")
+    parser.add_argument("--version", action="version", version=f"sector-ai {__version__}")
+    parser.add_argument("--model", dest="default_model", help="Default Ollama model (SECTOR_AI_DEFAULT_MODEL)")
+    parser.add_argument(
+        "--vision-model", dest="vision_model", help="Ollama model used for images (SECTOR_AI_VISION_MODEL)"
+    )
+    parser.add_argument("--ollama-url", dest="ollama_url", help="Ollama base URL (OLLAMA_URL)")
+    parser.add_argument(
+        "--admin",
+        dest="admin_usernames",
+        action="append",
+        metavar="USERNAME",
+        help="Admin username, repeatable; replaces SECTOR_AI_ADMIN_USERNAMES when given",
+    )
+    parser.add_argument(
+        "--log-level", dest="log_level", type=str.upper, choices=LOG_LEVELS, help="Logging level (SECTOR_AI_LOG_LEVEL)"
+    )
+    return parser
+
+
+def settings_from_args(args: argparse.Namespace) -> Settings:
+    """Build settings with the CLI values taking precedence over the environment."""
+    overrides = {key: value for key, value in vars(args).items() if value is not None}
+    return Settings(**overrides)
+
+
+def main(argv: list[str] | None = None) -> None:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    try:
+        settings = settings_from_args(args)
+    except ValidationError as error:
+        # A container should log the reason, not a traceback.
+        messages = "; ".join(entry["msg"] for entry in error.errors())
+        parser.exit(2, f"{parser.prog}: {messages}\n")
+    except SettingsError as error:
+        parser.exit(2, f"{parser.prog}: {error}\n")
+
+    warnings.filterwarnings("ignore", category=FutureWarning)
+    logging.basicConfig(
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        level=settings.log_level,
+    )
 
     # Create the application with custom context type
     context_types = ContextTypes(context=SectorContext)
-    application = Application.builder().token(config_file["telegram_bot_token"]).context_types(context_types).build()
-    application.bot_data["config"] = config_file
+    application = (
+        Application.builder().token(settings.telegram_bot_token.get_secret_value()).context_types(context_types).build()
+    )
+    application.bot_data["settings"] = settings
 
     # Add command handlers
     application.add_handler(CommandHandler("start", start_cmd))

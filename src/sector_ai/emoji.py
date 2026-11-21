@@ -17,7 +17,7 @@ async def emoji_cmd(update: Update, context: SectorContext) -> None:
     logger.info(f"Emoji Prompt: {prompt}")
     system_template_dict = await context.get_system_template_dict()
     template = PromptTemplate(
-        template=context.config_emoji_system_prompt, input_variables=["input", *system_template_dict.keys()]
+        template=context.settings.system_prompts.emoji, input_variables=["input", *system_template_dict.keys()]
     )
     chain = template | context.bot_ollama
     emoji_response = chain.invoke({"input": prompt, **system_template_dict}).content

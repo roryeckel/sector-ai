@@ -54,7 +54,7 @@ async def test_temperature_clears_without_arg(mock_update, mock_context):
 # --- clear_cmd ---
 
 
-async def test_clear_cmd_resets_state(mock_update, mock_context, sample_config):
+async def test_clear_cmd_resets_state(mock_update, mock_context):
     # Pre-populate history
     history = mock_context.chat_message_history
     from langchain_core.messages import HumanMessage
@@ -66,9 +66,8 @@ async def test_clear_cmd_resets_state(mock_update, mock_context, sample_config):
     await clear_cmd(update, mock_context)
 
     assert len(history) == 0
-    # clear_cmd sets chat_system_prompt = config_default_system_prompt
-    # On a MagicMock this goes through __setattr__, so verify it was assigned
-    assert mock_context.chat_system_prompt == sample_config["system_prompts"]["default"]
+    # clear_cmd sets chat_system_prompt to the settings default
+    assert mock_context.chat_system_prompt == mock_context.settings.system_prompts.default
     update.message.reply_text.assert_awaited_once()
 
 
@@ -143,4 +142,4 @@ async def test_system_prompt_cmd_resets_to_default(make_context, make_update):
 
     await system_prompt_cmd(update, context)
 
-    assert context.chat_system_prompt == context.config_default_system_prompt
+    assert context.chat_system_prompt == context.settings.system_prompts.default

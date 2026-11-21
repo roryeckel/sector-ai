@@ -1,11 +1,10 @@
-"""Tests for message routing and handler registration in __main__."""
+"""Tests for message routing, settings wiring and handler registration in __main__."""
 
-import json
-import sys
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 from telegram.ext import CallbackQueryHandler, CommandHandler, MessageHandler
 
@@ -184,12 +183,10 @@ class FakeBuilder:
 def test_main_registers_every_command(tmp_path, monkeypatch):
     application = FakeApplication()
     monkeypatch.setattr(entrypoint, "Application", SimpleNamespace(builder=lambda: FakeBuilder(application)))
+    monkeypatch.chdir(tmp_path)  # keep a developer's .env out of the test
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:abc")
 
-    config_path = tmp_path / "config.json"
-    config_path.write_text(json.dumps({"telegram_bot_token": "123:abc"}))
-    monkeypatch.setattr(sys, "argv", ["sector-ai", "--config", str(config_path)])
-
-    entrypoint.main()
+    entrypoint.main([])
 
     commands = set()
     for handler in application.handlers:
@@ -201,4 +198,62 @@ def test_main_registers_every_command(tmp_path, monkeypatch):
     assert len([handler for handler in application.handlers if isinstance(handler, MessageHandler)]) == 2
     assert application.error_handler is error_handler
     assert application.polling is True
-    assert application.bot_data["config"]["telegram_bot_token"] == "123:abc"
+    settings = application.bot_data["settings"]
+    assert settings.telegram_bot_token.get_secret_value() == "123:abc"
+
+
+def test_main_reports_missing_token_without_traceback(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("SECTOR_AI_TELEGRAM_BOT_TOKEN", raising=False)
+
+    with pytest.raises(SystemExit) as exit_info:
+        entrypoint.main([])
+
+    assert exit_info.value.code == 2
+    assert "TELEGRAM_BOT_TOKEN" in capsys.readouterr().err
+
+
+def test_main_reports_malformed_environment_without_traceback(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:abc")
+    monkeypatch.setenv("SECTOR_AI_OLLAMA_HEADERS", "not-json")
+
+    with pytest.raises(SystemExit) as exit_info:
+        entrypoint.main([])
+
+    assert exit_info.value.code == 2
+    assert "ollama_headers" in capsys.readouterr().err
+
+
+def test_main_cli_overrides_environment(tmp_path, monkeypatch):
+    application = FakeApplication()
+    monkeypatch.setattr(entrypoint, "Application", SimpleNamespace(builder=lambda: FakeBuilder(application)))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:abc")
+    monkeypatch.setenv("SECTOR_AI_DEFAULT_MODEL", "env-model")
+    monkeypatch.setenv("SECTOR_AI_ADMIN_USERNAMES", "envadmin,someone")
+
+    entrypoint.main(["--model", "cli-model", "--admin", "cliadmin", "--admin", "other", "--log-level", "debug"])
+
+    settings = application.bot_data["settings"]
+    assert settings.default_model == "cli-model"
+    assert settings.admin_usernames == ["cliadmin", "other"]
+    assert settings.log_level == "DEBUG"
+
+
+def test_version_flag_prints_version(monkeypatch, capsys):
+    with pytest.raises(SystemExit) as exit_info:
+        entrypoint.main(["--version"])
+
+    assert exit_info.value.code == 0
+    assert entrypoint.__version__ in capsys.readouterr().out
+
+
+def test_parser_rejects_unknown_log_level():
+    parser = entrypoint.build_parser()
+
+    with pytest.raises(SystemExit) as exit_info:
+        parser.parse_args(["--log-level", "LOUD"])
+
+    assert exit_info.value.code == 2

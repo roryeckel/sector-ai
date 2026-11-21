@@ -25,7 +25,7 @@ async def poll_cmd(update: Update, context: SectorContext) -> None:
     system_template_dict = await context.get_system_template_dict()
     parser = PydanticOutputParser(pydantic_object=BasicPoll)
     template = PromptTemplate(
-        template=context.config_basic_poll_system_prompt,
+        template=context.settings.system_prompts.basic_poll,
         input_variables=["query", *system_template_dict.keys()],
         partial_variables={"format_instructions": parser.get_format_instructions()},
     )

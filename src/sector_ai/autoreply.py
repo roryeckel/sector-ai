@@ -12,7 +12,9 @@ async def should_respond(update: Update, context: SectorContext) -> bool | str:
     if context.save_user_message(update.message) and context.chat_autoreply_mode:
         try:
             should_respond = await make_decision(
-                context.config_decide_system_prompt, context, partial_variables={"input": update.effective_message.text}
+                context.settings.system_prompts.decide,
+                context,
+                partial_variables={"input": update.effective_message.text},
             )
         except Exception as e:
             logger.exception("Decision Error", exc_info=e)

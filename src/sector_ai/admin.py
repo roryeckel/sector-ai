@@ -12,7 +12,7 @@ def admin_only(func):
     @wraps(func)
     async def wrapper(update: Update, context: SectorContext, *args, **kwargs):
         if context is None or (
-            update.effective_user and update.effective_user.username in context.config_admin_usernames
+            update.effective_user and update.effective_user.username in context.settings.admin_usernames
         ):
             return await func(update, context, *args, **kwargs)
         else:
@@ -24,7 +24,7 @@ def admin_only(func):
 
 async def clear_cmd(update: Update, context: SectorContext) -> None:
     context.chat_message_history.clear()
-    context.chat_system_prompt = context.config_default_system_prompt
+    context.chat_system_prompt = context.settings.system_prompts.default
     await update.message.reply_text("Cleared context and set the default system prompt.")
 
 
@@ -114,5 +114,5 @@ async def system_prompt_cmd(update: Update, context: SectorContext) -> None:
         context.chat_system_prompt = new_system_prompt[-1]
         await update.message.reply_text("Updated the system prompt.")
     else:
-        context.chat_system_prompt = context.config_default_system_prompt
+        context.chat_system_prompt = context.settings.system_prompts.default
         await update.message.reply_text("Reset the system prompt to default.")
