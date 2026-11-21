@@ -17,7 +17,7 @@ async def handle_chat(update: Update, context: SectorContext, system_prompt: str
     response_message = await update.message.reply_text("Processing...")
 
     try:
-        stream_generator = chain.stream(await context.get_system_template_dict())
+        stream_generator = chain.astream(await context.get_system_template_dict())
         response = await handle_streaming_response(context, response_message, stream_generator, "Chat")
 
         if response.startswith("AI:"):

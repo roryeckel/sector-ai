@@ -1,6 +1,7 @@
 import asyncio
 import contextlib
 import logging
+from collections.abc import AsyncIterator
 
 from telegram import Message
 
@@ -10,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 
 async def handle_streaming_response(
-    context: SectorContext, response_message: Message, stream_generator, log_prefix: str
+    context: SectorContext, response_message: Message, stream_generator: AsyncIterator, log_prefix: str
 ) -> str:
     response = ""
     buffer = ""
@@ -37,7 +38,7 @@ async def handle_streaming_response(
         return True
 
     try:
-        for chunk in stream_generator:
+        async for chunk in stream_generator:
             if not chunk:
                 break
 

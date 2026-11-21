@@ -22,11 +22,17 @@ def chunks(*parts):
     return [SimpleNamespace(content=part) for part in parts]
 
 
+async def aiter_chunks(items):
+    """The handler consumes the async generator that ``astream`` returns."""
+    for item in items:
+        yield item
+
+
 async def test_single_flush_when_thresholds_not_reached(make_context, recording_message, quiet_settings):
     context = make_context(settings=quiet_settings)
     message = recording_message()
 
-    response = await handle_streaming_response(context, message, iter(chunks("alpha", " ", "beta")), "Chat")
+    response = await handle_streaming_response(context, message, aiter_chunks(chunks("alpha", " ", "beta")), "Chat")
 
     assert response == "alpha beta"
     assert message.texts("edit_text") == ["alpha beta"]
@@ -37,7 +43,7 @@ async def test_cursor_present_during_updates_absent_at_end(make_context, recordi
     message = recording_message()
     cursor = context.settings.streaming_cursor
 
-    await handle_streaming_response(context, message, iter(chunks("alpha", " ", "beta")), "Chat")
+    await handle_streaming_response(context, message, aiter_chunks(chunks("alpha", " ", "beta")), "Chat")
 
     edits = message.texts("edit_text")
     assert len(edits) > 1
@@ -50,7 +56,7 @@ async def test_no_duplicate_consecutive_edits(make_context, recording_message, f
     context = make_context(settings=fast_settings)
     message = recording_message()
 
-    await handle_streaming_response(context, message, iter(chunks("alpha", " ", "beta")), "Chat")
+    await handle_streaming_response(context, message, aiter_chunks(chunks("alpha", " ", "beta")), "Chat")
 
     edits = message.texts("edit_text")
     assert all(previous != current for previous, current in zip(edits, edits[1:]))
@@ -60,7 +66,7 @@ async def test_generator_error_is_reported_and_returns_empty(make_context, recor
     context = make_context()
     message = recording_message()
 
-    def exploding():
+    async def exploding():
         yield SimpleNamespace(content="partial")
         raise RuntimeError("boom")
 
@@ -74,7 +80,7 @@ async def test_edit_failure_stops_streaming_early(make_context, recording_messag
     context = make_context(settings=fast_settings)
     message = recording_message(fail_times=1)
 
-    response = await handle_streaming_response(context, message, iter(chunks("alpha", " ", "beta")), "Chat")
+    response = await handle_streaming_response(context, message, aiter_chunks(chunks("alpha", " ", "beta")), "Chat")
 
     # Streaming stops at the first failed edit; the text received so far is then
     # flushed once more so the user sees a partial answer rather than a spinner.
@@ -86,7 +92,7 @@ async def test_falsy_chunk_ends_stream(make_context, recording_message):
     context = make_context()
     message = recording_message()
 
-    response = await handle_streaming_response(context, message, iter([None]), "Chat")
+    response = await handle_streaming_response(context, message, aiter_chunks([None]), "Chat")
 
     assert response == ""
     assert message.calls_to("edit_text") == []
@@ -96,7 +102,7 @@ async def test_pending_update_cancelled_on_error(make_context, recording_message
     context = make_context(settings=fast_settings)
     message = recording_message()
 
-    def exploding():
+    async def exploding():
         yield SimpleNamespace(content="alpha")
         raise RuntimeError("boom")
 

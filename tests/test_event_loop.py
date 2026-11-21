@@ -1,0 +1,74 @@
+"""Regression tests: model and Ollama calls must not stall the event loop.
+
+``python-telegram-bot`` polls and sends on the same loop the handlers run on. A
+synchronous model call blocks that loop, so long generations starve outbound
+requests until they time out. These tests hold the model (and a slow ``/models``
+lookup) for 300 ms and count how often a concurrent ticker still runs.
+"""
+
+import asyncio
+import time
+
+from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import AIMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
+
+from sector_ai.admin import models_cmd
+from sector_ai.chat import handle_chat
+
+TICK = 0.01
+
+
+class SlowModel(BaseChatModel):
+    """Answers after a synchronous ``time.sleep``, like a cold Ollama load."""
+
+    delay: float = 0.3
+
+    @property
+    def _llm_type(self) -> str:
+        return "slow"
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        time.sleep(self.delay)
+        return ChatResult(generations=[ChatGeneration(message=AIMessage(content="slow answer"))])
+
+
+async def count_ticks(duration: float) -> int:
+    ticks = 0
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + duration
+    while loop.time() < deadline:
+        ticks += 1
+        await asyncio.sleep(TICK)
+    return ticks
+
+
+async def test_handle_chat_does_not_block_the_event_loop(make_context, make_update, make_settings):
+    settings = make_settings(streaming_interval_sec=999, streaming_chunk_size=999_999)
+    context = make_context(model=SlowModel(), settings=settings)
+    update = make_update(text="/chat hi")
+
+    ticker = asyncio.create_task(count_ticks(0.25))
+    await handle_chat(update, context)
+    ticks = await ticker
+
+    assert update.message.texts("edit_text")[-1] == "slow answer"
+    assert ticks >= 5, f"event loop stalled during the model call (only {ticks} ticks)"
+
+
+async def test_models_cmd_does_not_block_the_event_loop(make_context, make_update, monkeypatch):
+    context = make_context("unused")
+
+    def slow_get_models():
+        time.sleep(0.3)
+        return [{"model": "a:latest", "label": "a:latest"}]
+
+    monkeypatch.setattr(context, "get_models", slow_get_models)
+    update = make_update(text="/models", username="ex0dus")
+
+    ticker = asyncio.create_task(count_ticks(0.25))
+    await models_cmd(update, context)
+    ticks = await ticker
+
+    assert update.message.calls_to("reply_text")[0][1]["reply_markup"] is not None
+    assert ticks >= 5, f"event loop stalled during the model listing (only {ticks} ticks)"

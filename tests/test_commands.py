@@ -34,7 +34,7 @@ async def test_make_decision_returns_bool(mock_context):
     mock_context.get_system_template_dict = AsyncMock(return_value={"MAX_LEN": 4096, "USERNAME": "testbot"})
 
     mock_chain = MagicMock()
-    mock_chain.invoke.return_value = Decision(result=True)
+    mock_chain.ainvoke = AsyncMock(return_value=Decision(result=True))
 
     with patch("sector_ai.decision.PydanticOutputParser"), patch("sector_ai.decision.PromptTemplate") as mock_template:
         mock_template.return_value.__or__ = MagicMock(return_value=MagicMock(__or__=MagicMock(return_value=mock_chain)))
@@ -47,7 +47,7 @@ async def test_make_decision_returns_string_on_parse_error(mock_context):
     mock_context.get_system_template_dict = AsyncMock(return_value={"MAX_LEN": 4096, "USERNAME": "testbot"})
 
     mock_chain = MagicMock()
-    mock_chain.invoke.side_effect = OutputParserException("bad", llm_output="garbage")
+    mock_chain.ainvoke = AsyncMock(side_effect=OutputParserException("bad", llm_output="garbage"))
 
     with patch("sector_ai.decision.PydanticOutputParser"), patch("sector_ai.decision.PromptTemplate") as mock_template:
         mock_template.return_value.__or__ = MagicMock(return_value=MagicMock(__or__=MagicMock(return_value=mock_chain)))
@@ -90,7 +90,7 @@ async def test_poll_validates_option_count(mock_update, mock_context):
     bad_poll = BasicPoll(question="Test?", options=["Only one"] * (PollLimit.MIN_OPTION_NUMBER - 1))
 
     mock_chain = MagicMock()
-    mock_chain.invoke.return_value = bad_poll
+    mock_chain.ainvoke = AsyncMock(return_value=bad_poll)
 
     update = mock_update(text="/poll make a poll", username="testuser")
 
