@@ -1,9 +1,11 @@
 """Tests for decision, autoreply, and poll commands."""
 
+import json
 from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 import pytest
 from langchain_core.exceptions import OutputParserException
+from telegram.constants import PollLimit
 
 from sector_ai.autoreply import should_respond
 from sector_ai.decision import Decision, decide_cmd, make_decision
@@ -34,8 +36,7 @@ async def test_make_decision_returns_bool(mock_context):
     mock_chain = MagicMock()
     mock_chain.invoke.return_value = Decision(result=True)
 
-    with patch("sector_ai.decision.PydanticOutputParser"), \
-         patch("sector_ai.decision.PromptTemplate") as mock_template:
+    with patch("sector_ai.decision.PydanticOutputParser"), patch("sector_ai.decision.PromptTemplate") as mock_template:
         mock_template.return_value.__or__ = MagicMock(return_value=MagicMock(__or__=MagicMock(return_value=mock_chain)))
         result = await make_decision("test prompt", mock_context)
 
@@ -48,8 +49,7 @@ async def test_make_decision_returns_string_on_parse_error(mock_context):
     mock_chain = MagicMock()
     mock_chain.invoke.side_effect = OutputParserException("bad", llm_output="garbage")
 
-    with patch("sector_ai.decision.PydanticOutputParser"), \
-         patch("sector_ai.decision.PromptTemplate") as mock_template:
+    with patch("sector_ai.decision.PydanticOutputParser"), patch("sector_ai.decision.PromptTemplate") as mock_template:
         mock_template.return_value.__or__ = MagicMock(return_value=MagicMock(__or__=MagicMock(return_value=mock_chain)))
         result = await make_decision("test prompt", mock_context)
 
@@ -86,16 +86,42 @@ async def test_poll_no_prompt(mock_update, mock_context):
 async def test_poll_validates_option_count(mock_update, mock_context):
     mock_context.get_system_template_dict = AsyncMock(return_value={"MAX_LEN": 4096, "USERNAME": "testbot"})
 
-    # Chain returns a poll with only 1 option (below MIN_OPTION_NUMBER=2)
-    bad_poll = BasicPoll(question="Test?", options=["Only one"])
+    # Chain returns a poll with fewer options than the API allows (Bot API 10.0 allows 1)
+    bad_poll = BasicPoll(question="Test?", options=["Only one"] * (PollLimit.MIN_OPTION_NUMBER - 1))
 
     mock_chain = MagicMock()
     mock_chain.invoke.return_value = bad_poll
 
     update = mock_update(text="/poll make a poll", username="testuser")
 
-    with patch("sector_ai.poll.PydanticOutputParser"), \
-         patch("sector_ai.poll.PromptTemplate") as mock_template:
+    with patch("sector_ai.poll.PydanticOutputParser"), patch("sector_ai.poll.PromptTemplate") as mock_template:
         mock_template.return_value.__or__ = MagicMock(return_value=MagicMock(__or__=MagicMock(return_value=mock_chain)))
         with pytest.raises(OutputParserException):
             await poll_cmd(update, mock_context)
+
+
+# --- poll end-to-end with a fake model ---
+
+
+async def test_poll_sends_parsed_poll(make_context, make_update):
+    payload = json.dumps({"question": "Pick one", "options": ["alpha", "beta", "gamma"]})
+    context = make_context(payload)
+    update = make_update(text="/poll pick something")
+
+    await poll_cmd(update, context)
+
+    question, options = update.message.calls_to("reply_poll")[0][0]
+    assert question == "Pick one"
+    assert options == ["alpha", "beta", "gamma"]
+    assert update.message.calls_to("reply_poll")[0][1]["is_anonymous"] is False
+
+
+async def test_poll_rejects_overlong_option(make_context, make_update):
+    payload = json.dumps({"question": "Pick one", "options": ["x" * (PollLimit.MAX_OPTION_LENGTH + 1), "beta"]})
+    context = make_context(payload)
+    update = make_update(text="/poll pick something")
+
+    with pytest.raises(OutputParserException):
+        await poll_cmd(update, context)
+
+    assert update.message.calls_to("reply_poll") == []

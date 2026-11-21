@@ -1,8 +1,9 @@
 import logging
 from io import BytesIO
 
+import pypdfium2 as pdfium
 from langchain_core.prompts import PromptTemplate
-from reportlab.graphics import renderPM
+from reportlab.graphics import renderPDF
 from svglib.svglib import svg2rlg
 from telegram import Update
 from telegram.error import BadRequest
@@ -10,6 +11,34 @@ from telegram.error import BadRequest
 from .sector_context import SectorContext
 
 logger = logging.getLogger(__name__)
+
+
+def render_svg_png(svg: str, size: int) -> BytesIO:
+    """Rasterise SVG markup into a PNG buffer, scaled to roughly ``size`` pixels."""
+    drawing = svg2rlg(BytesIO(svg.encode("utf-8")))
+    if not drawing:
+        raise ValueError("Unable to parse SVG")
+
+    scale_factor = size / max(drawing.width, drawing.height)
+    drawing.scale(scale_factor, scale_factor)
+    drawing.width = size
+    drawing.height = size
+
+    # reportlab 5 dropped its built-in bitmap backend, and svglib's gradient support
+    # relies on the PDF canvas, so render to PDF and rasterise that instead.
+    pdf_buffer = BytesIO()
+    renderPDF.drawToFile(drawing, pdf_buffer)
+    pdf_buffer.seek(0)
+
+    png_buffer = BytesIO()
+    pdf = pdfium.PdfDocument(pdf_buffer)
+    try:
+        pdf[0].render(scale=2).to_pil().save(png_buffer, format="PNG")
+    finally:
+        pdf.close()
+
+    png_buffer.seek(0)
+    return png_buffer
 
 
 async def code_cmd(update: Update, context: SectorContext) -> None:
@@ -80,17 +109,7 @@ async def svg_cmd(update: Update, context: SectorContext) -> None:
         svg = chain.invoke({"input": svg_prompt, **system_template_dict}).content.strip("```")
         logger.info(f"SVG: {svg}")
         try:
-            drawing = svg2rlg(BytesIO(svg.encode("utf-8")))
-            if not drawing:
-                continue
-            svg_size = context.chat_svg_size
-            scale_factor = svg_size / max(drawing.width, drawing.height)
-            drawing.scale(scale_factor, scale_factor)
-            drawing.width = svg_size
-            drawing.height = svg_size
-            png_file = BytesIO()
-            renderPM.drawToFile(drawing, png_file, fmt="PNG")
-            png_file.seek(0)
+            png_file = render_svg_png(svg, context.chat_svg_size)
             await update.message.reply_photo(photo=png_file)
             return
         except Exception as e:
