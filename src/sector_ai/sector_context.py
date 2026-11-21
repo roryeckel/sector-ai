@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from collections import deque
 from typing import Optional
 
@@ -11,6 +12,8 @@ from telegram.constants import MessageLimit
 from telegram.ext import Application, CallbackContext
 
 from .settings import Settings
+
+logger = logging.getLogger(__name__)
 
 
 class SectorContext(CallbackContext):
@@ -130,13 +133,17 @@ class SectorContext(CallbackContext):
 
             result = [r for r in response.json()["models"] if r["model"] not in self.settings.ollama_disallowed_models]
             # One lookup per installed model: gathering them keeps the order of the
-            # list while costing one round trip instead of one per model.
+            # list while costing one round trip instead of one per model. A single
+            # slow or missing model must not cost the whole list.
             shows = await asyncio.gather(
-                *(client.post(f"{self.settings.ollama_url}/api/show", json={"name": r["model"]}) for r in result)
+                *(client.post(f"{self.settings.ollama_url}/api/show", json={"name": r["model"]}) for r in result),
+                return_exceptions=True,
             )
 
         for r, show_response in zip(result, shows):
-            if show_response.is_success:
+            if isinstance(show_response, Exception):
+                logger.warning("Ollama metadata lookup failed for %s: %s", r["model"], show_response)
+            elif show_response.is_success:
                 r.update(show_response.json())
 
             r["is_default_active"] = r["model"] == self.get_model()

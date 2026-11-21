@@ -274,6 +274,28 @@ async def test_get_models_filters_disallowed_and_labels(make_context):
     assert default["label"].startswith("✅")
 
 
+async def test_get_models_survives_a_failed_metadata_lookup(make_context, caplog):
+    context = make_context("unused")
+    context.bot_ollama.model = "good:latest"
+
+    def handler(request):
+        if request.url.path == "/api/tags":
+            return httpx.Response(200, json={"models": [{"model": "good:latest"}, {"model": "slow:latest"}]})
+        if json.loads(request.content)["name"] == "slow:latest":
+            raise httpx.ReadTimeout("too slow", request=request)
+        return httpx.Response(200, json={"details": {"family": "llama"}})
+
+    with _client_with(handler), caplog.at_level("WARNING"):
+        models = await context.get_models()
+
+    # The slow model still appears, just without the metadata the others have.
+    assert [model["model"] for model in models] == ["good:latest", "slow:latest"]
+    assert models[0]["details"] == {"family": "llama"}
+    assert "details" not in models[1]
+    assert models[1]["label"] == "slow:latest"
+    assert "slow:latest" in caplog.text
+
+
 def test_settings_setter_updates_bot_data(make_context, make_settings):
     context = make_context("unused")
     new_settings = make_settings(default_model="other:latest")
