@@ -1,9 +1,10 @@
-"""Regression tests: model and Ollama calls must not stall the event loop.
+"""Regression tests: model and Ollama work must not stall the event loop.
 
 ``python-telegram-bot`` polls and sends on the same loop the handlers run on. A
 synchronous model call blocks that loop, so long generations starve outbound
-requests until they time out. These tests hold the model (and a slow ``/models``
-lookup) for 300 ms and count how often a concurrent ticker still runs.
+requests until they time out. The first test holds the model for 300 ms and
+counts how often a concurrent ticker still runs. The second checks that the
+``/models`` lookup is awaited, which is what keeps its HTTP calls off the loop.
 """
 
 import asyncio
@@ -72,19 +73,20 @@ async def test_handle_chat_does_not_block_the_event_loop(make_context, make_upda
     assert ticks >= 5, f"event loop stalled during the model call (only {ticks} ticks)"
 
 
-async def test_models_cmd_does_not_block_the_event_loop(make_context, make_update, monkeypatch):
+async def test_models_cmd_awaits_its_lookup(make_context, make_update, monkeypatch):
     context = make_context("unused")
+    awaited = []
 
-    def slow_get_models():
-        time.sleep(0.3)
+    async def get_models():
+        # If the handler forgets the await, this coroutine never starts and the
+        # keyboard is built from a coroutine object, which fails loudly.
+        awaited.append("started")
         return [{"model": "a:latest", "label": "a:latest"}]
 
-    monkeypatch.setattr(context, "get_models", slow_get_models)
+    monkeypatch.setattr(context, "get_models", get_models)
     update = make_update(text="/models", username="ex0dus")
 
-    ticker, _ = await start_ticker(0.25)
     await models_cmd(update, context)
-    ticks = await ticker
 
+    assert awaited == ["started"]
     assert update.message.calls_to("reply_text")[0][1]["reply_markup"] is not None
-    assert ticks >= 5, f"event loop stalled during the model listing (only {ticks} ticks)"
