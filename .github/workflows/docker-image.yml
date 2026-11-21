@@ -1,0 +1,103 @@
+name: Docker image
+
+# Builds ghcr.io/<owner>/<repo> for every master push (edge) and for every
+# published release (version tags plus latest). Multi-arch because this bot is
+# the sort of thing that runs on a Pi or an ARM NAS, and no dependency needs a
+# compiler there: pypdfium2, pillow and reportlab all ship aarch64 wheels.
+
+on:
+  push:
+    branches: [master]
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to rebuild, for example v1.4.0"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      IMAGE: ghcr.io/${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+          fetch-depth: 0
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+        with:
+          platforms: arm64
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to the GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=raw,value=latest,enable=${{ github.event_name == 'release' && !github.event.release.prerelease }}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=edge,enable=${{ github.event_name == 'push' }}
+            type=raw,value=${{ github.event.inputs.tag || 'manual' }},enable=${{ github.event_name == 'workflow_dispatch' }}
+            type=sha,prefix=sha-
+          labels: |
+            org.opencontainers.image.title=Sector AI
+            org.opencontainers.image.description=Telegram bot backed by LangChain and Ollama
+            org.opencontainers.image.licenses=GPL-3.0-only
+
+      - name: Build and push
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: true
+
+      # The image is pulled from the registry rather than reused from the local
+      # build cache: this checks the manifest that was actually pushed, the
+      # platform-specific variant a user would get, and that the console script
+      # reports the version the tag claims.
+      - name: Smoke test the published image
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.meta.outputs.version }}"
+          EXPECTED="${{ github.event.release.tag_name || github.event.inputs.tag }}"
+          EXPECTED="${EXPECTED#v}"
+          if [ -z "$EXPECTED" ]; then
+            EXPECTED="$(python3 scripts/version.py get)"
+          fi
+          docker pull "$IMAGE:$TAG"
+          ACTUAL="$(docker run --rm "$IMAGE:$TAG" --version)"
+          if [ "$ACTUAL" != "sector-ai $EXPECTED" ]; then
+            echo "expected 'sector-ai $EXPECTED', got '$ACTUAL'" >&2
+            exit 1
+          fi
+          echo "$IMAGE:$TAG reports $ACTUAL"

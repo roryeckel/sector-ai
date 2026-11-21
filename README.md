@@ -1,5 +1,10 @@
 # Sector AI Telegram Bot
 
+[![CI](https://github.com/roryeckel/sector-ai/actions/workflows/ci.yml/badge.svg)](https://github.com/roryeckel/sector-ai/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/sector-ai.svg)](https://pypi.org/project/sector-ai/)
+[![Docker](https://img.shields.io/github/v/release/roryeckel/sector-ai?label=ghcr.io&logo=docker&logoColor=white&color=2496ED)](https://github.com/roryeckel/sector-ai/pkgs/container/sector-ai)
+[![License](https://img.shields.io/github/license/roryeckel/sector-ai.svg)](https://github.com/roryeckel/sector-ai/blob/master/LICENSE)
+
 This repository contains the implementation of the Sector AI Telegram Bot, an advanced chatbot designed to interact with users on Telegram. The secret sauce is LangChain. The bot supports various functionalities, including autoreply decision-making, structured output parsing for polls, multimodal image processing, emoji responses, code generation, and more. Below is a detailed description of all components of this repository.
 
 ### Installing Ollama
@@ -97,33 +102,64 @@ This project uses the `python-telegram-bot` library, with various command handle
 
 ## Getting Started
 
-To get started with the Sector AI Telegram Bot, follow these steps:
+### From PyPI
 
-1. **Prerequisites**:
-    - Ensure you have Python 3.11 or newer installed, and Ollama running (see above).
+```sh
+pip install sector-ai
+```
 
-2.  **Clone the repository**:
+Create a `.env` in the directory you will run from, or export the variables directly. The [Configuration](#configuration) table lists every setting; at minimum you need `TELEGRAM_BOT_TOKEN` and a reachable Ollama.
+
+```sh
+sector-ai
+```
+
+`sector-ai` reads `.env` from the current directory. `python -m sector_ai` is equivalent.
+
+### From a clone
+
+1. **Prerequisites**: Python 3.11 or newer, and Ollama running (see above).
+2. **Clone and install**:
     ```sh
     git clone https://github.com/roryeckel/sector-ai.git
     cd sector-ai
-    ```
-
-3.  **Install the project and its dependencies**:
-    ```sh
     pip install .
     ```
+3. **Configure**: copy `.env.example` to `.env` and set at least `TELEGRAM_BOT_TOKEN`.
+4. **Run**: `sector-ai`
 
-4.  **Configure the bot**:
-    - Copy `.env.example` to `.env` and set at least `TELEGRAM_BOT_TOKEN`.
-    - Everything has a sensible default; see [Configuration](#configuration) for the rest.
+Upgrading from 1.3.x: the `--config` flag and `config.json` are gone. Move the values you had changed into `.env`; `.env.example` lists every setting and its default.
 
-5.  **Run the bot**:
-    ```sh
-    sector-ai
-    ```
-    The `sector-ai` command reads `.env` from the current directory. Running `python -m sector_ai` works the same way.
+## Docker
 
-    Upgrading from 1.3.x: the `--config` flag and `config.json` are gone. Move the values you had changed into `.env`; `.env.example` lists every setting and its default.
+Images are published to the GitHub Container Registry for `linux/amd64` and `linux/arm64`. The bot makes no inbound connections, so no ports are exposed.
+
+```sh
+docker run -d --name sector-ai --restart unless-stopped \
+  -e TELEGRAM_BOT_TOKEN=your-token \
+  -e OLLAMA_URL=http://host.docker.internal:11434 \
+  --add-host host.docker.internal:host-gateway \
+  ghcr.io/roryeckel/sector-ai:latest
+```
+
+Or, from a clone, `compose.yaml` does the same:
+
+```sh
+cp .env.example .env   # set TELEGRAM_BOT_TOKEN and OLLAMA_URL
+docker compose up -d
+```
+
+Inside the container, `localhost` is the container itself, so Ollama on the host needs `host.docker.internal` (Docker Desktop resolves it automatically; the `--add-host` flag or the `extra_hosts` entry in `compose.yaml` covers Linux).
+
+Image tags:
+
+| Tag | Meaning |
+| --- | --- |
+| `latest` | latest published release, not a prerelease |
+| `1.4.0` | exact release |
+| `1.4` | latest patch of that minor |
+| `edge` | latest commit on `master` |
+| `sha-abc1234` | exact commit |
 
 ## Configuration
 
