@@ -132,10 +132,14 @@ jobs:
           if [ -z "$TAG" ]; then
             TAG="$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || true)"
           fi
-          if printf '%s' "$TAG" | grep -qE '[\r\n]'; then
-            echo "previous tag must not contain line breaks" >&2
-            exit 1
-          fi
+          # A case pattern, not grep: inside an ERE bracket expression "\r" and
+          # "\n" are the literal letters, which would reject v1.4.0-rc.1.
+          case "$TAG" in
+            *$'\r'* | *$'\n'*)
+              echo "previous tag must not contain line breaks" >&2
+              exit 1
+              ;;
+          esac
           printf 'tag=%s\n' "$TAG" >> "$GITHUB_OUTPUT"
 
       - name: Create or update the draft release
