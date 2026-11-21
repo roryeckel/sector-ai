@@ -107,10 +107,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      - uses: actions/checkout@v6
+
       - name: Install the published version in a clean environment
         run: |
           set -euo pipefail
           VERSION="${TAG#v}"
+          # importlib.metadata reports the PEP 440 form, so 1.4.0-rc.1 becomes
+          # 1.4.0rc1. Compare against that, not against the tag spelling.
+          CANONICAL="$(python3 scripts/version.py canonical "$VERSION")"
           python3 -m venv "$RUNNER_TEMP/verify"
           PY="$RUNNER_TEMP/verify/bin/python"
           for attempt in 1 2 3 4 5; do
@@ -125,7 +130,7 @@ jobs:
             sleep 15
           done
           ACTUAL="$("$RUNNER_TEMP/verify/bin/sector-ai" --version)"
-          EXPECTED="sector-ai $VERSION"
+          EXPECTED="sector-ai $CANONICAL"
           if [ "$ACTUAL" != "$EXPECTED" ]; then
             echo "expected '$EXPECTED', got '$ACTUAL'" >&2
             exit 1

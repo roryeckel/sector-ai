@@ -7,6 +7,7 @@ import tomllib
 from pathlib import Path
 
 import pytest
+from packaging.version import Version
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "scripts" / "version.py"
@@ -19,6 +20,12 @@ def run(pyproject: Path, *args: str) -> subprocess.CompletedProcess:
         capture_output=True,
         text=True,
     )
+
+
+def write_pyproject(tmp_path: Path, version: str) -> Path:
+    target = tmp_path / "pyproject.toml"
+    target.write_text(f'[project]\nname = "sector-ai"\nversion = "{version}"\n', encoding="utf-8")
+    return target
 
 
 @pytest.fixture
@@ -86,6 +93,52 @@ def test_forward_check_rejects_the_same_or_lower_version(pyproject):
 def test_forward_check_accepts_a_prerelease_of_a_higher_version(pyproject):
     major = int(CURRENT.split(".")[0])
     assert run(pyproject, "forward-check", f"{major + 1}.0.0-rc.1").returncode == 0
+
+
+@pytest.mark.parametrize(
+    ("current", "candidate"),
+    [
+        ("1.4.0-alpha", "1.4.0-alpha.1"),
+        ("1.4.0-alpha.1", "1.4.0-beta"),
+        ("1.4.0-beta", "1.4.0-rc.1"),
+        ("1.4.0-rc.1", "1.4.0-rc.2"),
+        ("1.4.0-rc.2", "1.4.0"),
+        ("1.4.0", "1.4.1"),
+    ],
+)
+def test_forward_check_orders_prereleases(tmp_path, current, candidate):
+    """rc.1 -> rc.2 -> final must all sort forward, or prereleases are unusable."""
+    assert run(write_pyproject(tmp_path, current), "forward-check", candidate).returncode == 0
+
+
+@pytest.mark.parametrize(
+    ("current", "candidate"),
+    [
+        ("1.4.0", "1.4.0-rc.1"),
+        ("1.4.0-rc.2", "1.4.0-rc.1"),
+        ("1.4.0-beta", "1.4.0-alpha"),
+        ("1.4.1", "1.4.0"),
+    ],
+)
+def test_forward_check_rejects_a_lower_version(tmp_path, current, candidate):
+    assert run(write_pyproject(tmp_path, current), "forward-check", candidate).returncode == 1
+
+
+@pytest.mark.parametrize(
+    "version", ["1.3.0", "1.4.0-rc.1", "1.4.0-rc1", "1.4.0-alpha.2", "1.4.0-beta.10", "1.5.0-dev.3"]
+)
+def test_canonical_matches_packaging(version):
+    result = run(ROOT / "pyproject.toml", "canonical", version)
+
+    assert result.returncode == 0
+    assert result.stdout.strip() == str(Version(version))
+
+
+def test_check_accepts_equivalent_spellings(tmp_path):
+    """The tag may say rc.1 while installed metadata says rc1."""
+    target = write_pyproject(tmp_path, "1.4.0rc1")
+
+    assert run(target, "check", "1.4.0-rc.1").returncode == 0
 
 
 def test_rejects_a_non_semver(pyproject):

@@ -71,16 +71,18 @@ jobs:
           cache: pip
           cache-dependency-path: pyproject.toml
 
-      - name: Install
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[dev]"
-
       - name: Version must move forward
         run: python scripts/version.py forward-check "$VERSION"
 
       - name: Bump the version
         run: python scripts/version.py set "$VERSION"
+
+      # Install after the bump: the suite asserts that the installed metadata
+      # matches pyproject.toml, so an install from before the bump would fail it.
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
 
       - name: Lint, format and test the bumped tree
         run: |

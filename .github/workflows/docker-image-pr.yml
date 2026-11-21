@@ -34,7 +34,7 @@ jobs:
       - name: The image starts and reports the project version
         run: |
           set -euo pipefail
-          EXPECTED="$(python3 scripts/version.py get)"
+          EXPECTED="$(python3 scripts/version.py canonical "$(python3 scripts/version.py get)")"
           ACTUAL="$(docker run --rm sector-ai:pr --version)"
           if [ "$ACTUAL" != "sector-ai $EXPECTED" ]; then
             echo "expected 'sector-ai $EXPECTED', got '$ACTUAL'" >&2

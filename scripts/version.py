@@ -36,6 +36,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     forward_parser.add_argument("version")
 
+    canonical_parser = subparsers.add_parser("canonical", help="Print the PEP 440 form used by installed metadata")
+    canonical_parser.add_argument("version")
+
     return parser.parse_args(argv)
 
 
@@ -70,10 +73,44 @@ def write_version(path: Path, version: str) -> None:
     path.write_bytes(updated.replace("\n", newline).encode("utf-8"))
 
 
-def release_key(version: str) -> tuple[int, ...]:
-    """Sort key for the numeric part; a suffix counts as the same release."""
-    core = re.split(r"[-+]", version, maxsplit=1)[0]
-    return tuple(int(part) for part in core.split("."))
+def release_key(version: str) -> tuple:
+    """Precedence key matching semantic versioning, prereleases included.
+
+    ``1.4.0-alpha`` < ``1.4.0-alpha.1`` < ``1.4.0-beta`` < ``1.4.0-rc.1`` <
+    ``1.4.0``. Numeric identifiers compare numerically and sort below
+    alphanumeric ones, as the spec requires.
+    """
+    core, _, pre = normalize(version).partition("+")[0].partition("-")
+    core_key = tuple(int(part) for part in core.split("."))
+    if not pre:
+        return (*core_key, 1, ())
+    identifiers = []
+    for part in pre.split("."):
+        identifiers.append((0, int(part), "") if part.isdigit() else (1, 0, part))
+    return (*core_key, 0, tuple(identifiers))
+
+
+PRE_TAGS = {"a": "a", "alpha": "a", "b": "b", "beta": "b", "c": "rc", "rc": "rc", "pre": "rc", "preview": "rc"}
+
+
+def canonical(version: str) -> str:
+    """Return the PEP 440 form setuptools and importlib.metadata report.
+
+    ``1.4.0-rc.1`` is a valid tag but the installed distribution calls itself
+    ``1.4.0rc1``, so comparing ``sector-ai --version`` against the tag needs
+    this translation.
+    """
+    core, _, pre = normalize(version).partition("-")
+    if not pre:
+        return core
+    match = re.fullmatch(r"([A-Za-z]+)\.?(\d*)", pre)
+    if not match:
+        return normalize(version).lower()
+    tag = match.group(1).lower()
+    number = match.group(2)
+    if tag == "dev":
+        return f"{core}.dev{number}" if number else f"{core}.dev"
+    return f"{core}{PRE_TAGS.get(tag, tag)}{number}"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -86,6 +123,10 @@ def main(argv: list[str] | None = None) -> int:
 
     version = validate(args.version)
 
+    if args.command == "canonical":
+        print(canonical(version))
+        return 0
+
     if args.command == "set":
         write_version(path, version)
         print(f"version set to {version}")
@@ -94,7 +135,7 @@ def main(argv: list[str] | None = None) -> int:
     current = read_version(path)
 
     if args.command == "check":
-        if current != version:
+        if canonical(current) != canonical(version):
             raise SystemExit(f"pyproject.toml has {current}, expected {version}")
         print(f"version check passed ({version})")
         return 0

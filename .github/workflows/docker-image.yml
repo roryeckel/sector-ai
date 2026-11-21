@@ -94,6 +94,7 @@ jobs:
           if [ -z "$EXPECTED" ]; then
             EXPECTED="$(python3 scripts/version.py get)"
           fi
+          EXPECTED="$(python3 scripts/version.py canonical "$EXPECTED")"
           docker pull "$IMAGE:$TAG"
           ACTUAL="$(docker run --rm "$IMAGE:$TAG" --version)"
           if [ "$ACTUAL" != "sector-ai $EXPECTED" ]; then
