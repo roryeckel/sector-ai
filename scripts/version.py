@@ -107,9 +107,9 @@ def canonical(version: str) -> str:
     if not match:
         return normalize(version).lower()
     tag = match.group(1).lower()
-    number = match.group(2)
+    number = match.group(2) or "0"
     if tag == "dev":
-        return f"{core}.dev{number}" if number else f"{core}.dev"
+        return f"{core}.dev{number}"
     return f"{core}{PRE_TAGS.get(tag, tag)}{number}"
 
 

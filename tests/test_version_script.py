@@ -125,7 +125,21 @@ def test_forward_check_rejects_a_lower_version(tmp_path, current, candidate):
 
 
 @pytest.mark.parametrize(
-    "version", ["1.3.0", "1.4.0-rc.1", "1.4.0-rc1", "1.4.0-alpha.2", "1.4.0-beta.10", "1.5.0-dev.3"]
+    "version",
+    [
+        "1.3.0",
+        "1.4.0-rc.1",
+        "1.4.0-rc1",
+        "1.4.0-alpha.2",
+        "1.4.0-beta.10",
+        "1.5.0-dev.3",
+        # No trailing number: PEP 440 pads these with 0 (1.4.0a0).
+        "1.4.0-alpha",
+        "1.4.0-beta",
+        "1.4.0-rc",
+        "1.4.0-preview",
+        "1.4.0-dev",
+    ],
 )
 def test_canonical_matches_packaging(version):
     result = run(ROOT / "pyproject.toml", "canonical", version)

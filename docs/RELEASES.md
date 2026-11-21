@@ -60,7 +60,7 @@ readable message rather than a traceback.
 | Draft deleted after the PR merged | Dispatch `Release draft` with the version and `target_ref` = the merge commit. |
 | Publish failed at PyPI | Re-run the failed jobs. `skip-existing` makes the upload idempotent, so a partial run is safe. |
 | Publish failed after PyPI succeeded | Re-run only the failed jobs; the upload is skipped and the assets and verification still run. |
-| Docker build failed after PyPI | Re-run the failed Docker workflow, or dispatch `Docker image` with the tag. |
+| Docker build failed after PyPI | Re-run the failed Docker workflow, or dispatch `Docker image` with the tag. A dispatch restores `X.Y.Z` and `X.Y`; `latest` stays with the release it was published for. |
 | Wrong version published | Do not delete it. Yank it on PyPI, mark the release as a pre-release or delete it, then cut a patch version. `npm` has `deprecate`; PyPI has `yank`. |
 
 ## One-time repository setup

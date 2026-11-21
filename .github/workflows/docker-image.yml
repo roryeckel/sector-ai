@@ -59,10 +59,9 @@ jobs:
           images: ${{ env.IMAGE }}
           tags: |
             type=raw,value=latest,enable=${{ github.event_name == 'release' && !github.event.release.prerelease }}
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}},enable=${{ !github.event.release.prerelease }}
+            type=semver,pattern={{version}},value=${{ github.event.inputs.tag || github.ref }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ github.event.inputs.tag || github.ref }},enable=${{ !github.event.release.prerelease && !contains(github.event.inputs.tag, '-') }}
             type=raw,value=edge,enable=${{ github.event_name == 'push' }}
-            type=raw,value=${{ github.event.inputs.tag || 'manual' }},enable=${{ github.event_name == 'workflow_dispatch' }}
             type=sha,prefix=sha-
           labels: |
             org.opencontainers.image.title=Sector AI
