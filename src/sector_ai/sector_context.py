@@ -280,7 +280,7 @@ class SectorContext(CallbackContext):
         # logger.info(f"System Prompt: {system_prompt or self.chat_system_prompt}")
         system_prompt = system_prompt or self.chat_system_prompt
         included_history = (
-            self.chat_message_history if num_history is None else self.chat_message_history[-num_history:]
+            self.chat_message_history if num_history is None else list(self.chat_message_history)[-num_history:]
         )
         return ChatPromptTemplate.from_messages(
             [SystemMessagePromptTemplate.from_template(template=system_prompt), *included_history]
