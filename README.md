@@ -141,7 +141,7 @@ There is no configuration file. Settings come from environment variables, an opt
 | `SECTOR_AI_STREAMING_INTERVAL_SEC` | `0.7` | Minimum seconds between Telegram edits. |
 | `SECTOR_AI_STREAMING_CHUNK_SIZE` | `150` | Characters buffered before an edit. |
 | `SECTOR_AI_OLLAMA_TIMEOUT` | `200.0` | Request timeout in seconds. |
-| `SECTOR_AI_OLLAMA_CONTEXT_LENGTH` | `2048` | `num_ctx` passed to Ollama; set to `null` to leave it to the model. |
+| `SECTOR_AI_OLLAMA_CONTEXT_LENGTH` | `2048` | `num_ctx` passed to Ollama; set to `null` (or leave it empty) to leave it to the model. |
 | `SECTOR_AI_OLLAMA_DISALLOWED_MODELS` | *empty* | Comma separated models hidden from `/models`. |
 | `SECTOR_AI_OLLAMA_HEADERS` | `{}` | JSON object of extra HTTP headers for Ollama. |
 | `SECTOR_AI_SYSTEM_PROMPTS__<NAME>` | built-in | Override one system prompt, e.g. `SECTOR_AI_SYSTEM_PROMPTS__SVG`. |

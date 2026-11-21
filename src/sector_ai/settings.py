@@ -103,6 +103,14 @@ class Settings(BaseSettings):
     def _list_fields(cls, value: object) -> object:
         return _split_list(value)
 
+    @field_validator("ollama_context_length", mode="before")
+    @classmethod
+    def _nullable_context_length(cls, value: object) -> object:
+        """Environment values arrive as strings, so accept the documented spellings of "no cap"."""
+        if isinstance(value, str) and value.strip().lower() in {"", "null", "none"}:
+            return None
+        return value
+
     @field_validator("log_level")
     @classmethod
     def _log_level(cls, value: str) -> str:

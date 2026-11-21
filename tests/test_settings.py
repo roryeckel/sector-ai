@@ -185,6 +185,27 @@ def test_null_context_length_disables_the_cap(make_settings):
     assert make_settings(ollama_context_length=None).ollama_context_length is None
 
 
+@pytest.mark.parametrize("value", ["null", "NULL", "none", ""])
+def test_context_length_accepts_the_documented_null_spellings(monkeypatch, value):
+    """The README documents SECTOR_AI_OLLAMA_CONTEXT_LENGTH=null, so it must work from the environment."""
+    monkeypatch.setenv("SECTOR_AI_OLLAMA_CONTEXT_LENGTH", value)
+
+    assert env_only().ollama_context_length is None
+
+
+def test_context_length_still_parses_numbers_from_the_environment(monkeypatch):
+    monkeypatch.setenv("SECTOR_AI_OLLAMA_CONTEXT_LENGTH", "8192")
+
+    assert env_only().ollama_context_length == 8192
+
+
+def test_context_length_rejects_a_typo(monkeypatch):
+    monkeypatch.setenv("SECTOR_AI_OLLAMA_CONTEXT_LENGTH", "lots")
+
+    with pytest.raises(ValidationError):
+        env_only()
+
+
 def test_dotenv_file_is_read(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
