@@ -1,0 +1,52 @@
+name: Docker image (PR)
+
+# Builds the image on pull requests that touch it, without pushing anywhere.
+# The version check makes the Dockerfile's packaging paths (LICENSE and README
+# are copied, `pip install .` reads pyproject.toml) fail here rather than at
+# release time.
+
+on:
+  pull_request:
+    paths:
+      - Dockerfile
+      - .dockerignore
+      - pyproject.toml
+      - src/**
+      - .github/workflows/docker-image*.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docker-pr-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Build
+        run: docker build --tag sector-ai:pr .
+
+      - name: The image starts and reports the project version
+        run: |
+          set -euo pipefail
+          EXPECTED="$(python3 scripts/version.py canonical "$(python3 scripts/version.py get)")"
+          ACTUAL="$(docker run --rm sector-ai:pr --version)"
+          if [ "$ACTUAL" != "sector-ai $EXPECTED" ]; then
+            echo "expected 'sector-ai $EXPECTED', got '$ACTUAL'" >&2
+            exit 1
+          fi
+
+      - name: A missing token fails with a readable message
+        run: |
+          set -euo pipefail
+          output="$(docker run --rm sector-ai:pr 2>&1 || true)"
+          printf '%s\n' "$output"
+          if ! printf '%s' "$output" | grep -q "TELEGRAM_BOT_TOKEN"; then
+            echo "expected a TELEGRAM_BOT_TOKEN message" >&2
+            exit 1
+          fi

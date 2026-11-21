@@ -1,0 +1,126 @@
+name: Release prepare
+
+# Stage 1 of the release pipeline (docs/RELEASES.md): bump the version on a
+# release/vX.Y.Z branch, run the suite against the bumped tree, and open a PR.
+# Merging that PR is the decision that creates a draft release.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release, without the leading v (for example 1.4.0)"
+        required: true
+        type: string
+      dry_run:
+        description: "Bump and test, but push nothing"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: release-prepare
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      VERSION: ${{ inputs.version }}
+      BRANCH: release/v${{ inputs.version }}
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+
+      - name: Validate the version
+        run: |
+          set -euo pipefail
+          if [ -z "$VERSION" ]; then
+            echo "version is required" >&2
+            exit 1
+          fi
+          if [[ "$VERSION" == v* ]]; then
+            echo "pass the version without the leading v; the tag becomes v$VERSION" >&2
+            exit 1
+          fi
+          if ! printf '%s' "$VERSION" | grep -qE '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$'; then
+            echo "not a semantic version: $VERSION" >&2
+            exit 1
+          fi
+
+      - name: Guard against an existing tag or branch
+        run: |
+          set -euo pipefail
+          for REF in "refs/tags/v$VERSION" "refs/heads/$BRANCH"; do
+            if git ls-remote --exit-code origin "$REF" >/dev/null 2>&1; then
+              echo "$REF already exists; pick another version or delete the ref first" >&2
+              exit 1
+            fi
+          done
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Version must move forward
+        run: python scripts/version.py forward-check "$VERSION"
+
+      - name: Bump the version
+        run: python scripts/version.py set "$VERSION"
+
+      # Install after the bump: the suite asserts that the installed metadata
+      # matches pyproject.toml, so an install from before the bump would fail it.
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Lint, format and test the bumped tree
+        run: |
+          ruff check src tests scripts
+          ruff format --check src tests scripts
+          pytest --cov --cov-fail-under=95
+
+      - name: Show the diff on a dry run
+        if: ${{ inputs.dry_run }}
+        run: git --no-pager diff
+
+      - name: Commit, push and open the release PR
+        if: ${{ !inputs.dry_run }}
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git config user.name "release-prepare"
+          git config user.email "release-prepare@users.noreply.github.com"
+          git switch -c "$BRANCH"
+          git add -A
+          git commit -m "chore(release): $VERSION"
+          git push -u origin "$BRANCH"
+          {
+            echo "## Release v$VERSION"
+            echo ""
+            echo "- [x] Version bumped to \`$VERSION\` in pyproject.toml"
+            echo "- [x] ruff and pytest pass at this commit"
+            echo "- [ ] Merge = decision 1. A draft release appears at the merge commit."
+            echo "- [ ] Publishing that draft = decision 2. It ships to PyPI and GHCR."
+            echo ""
+            echo "See docs/RELEASES.md for the runbook and recovery paths."
+          } > pr-body.md
+          gh pr create --base "${{ github.event.repository.default_branch }}" --head "$BRANCH" \
+            --label release --title "Release v$VERSION" --body-file pr-body.md
+          echo "branch_created=true" >> "$GITHUB_OUTPUT"
+
+      - name: Clean up on failure
+        if: ${{ failure() && !inputs.dry_run && steps.pr.outputs.branch_created == 'true' }}
+        run: git push origin --delete "$BRANCH" || true

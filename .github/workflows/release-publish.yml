@@ -1,0 +1,138 @@
+name: Release publish
+
+# Stage 3 of the release pipeline (docs/RELEASES.md): publishing the draft
+# release is the ship decision. It builds the distributions, uploads them to
+# PyPI with trusted publishing (OIDC, no token), attaches them to the GitHub
+# release, and proves the published artefact installs and reports the right
+# version.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to (re)publish, for example v1.4.0"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  id-token: write
+
+concurrency:
+  group: release-publish-${{ github.event.release.tag_name || inputs.tag }}
+  cancel-in-progress: false
+
+env:
+  TAG: ${{ github.event.release.tag_name || inputs.tag }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ env.TAG }}
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Resolve the version
+        id: meta
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#v}"
+          printf 'version=%s\n' "$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: The tag and the package agree
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: python scripts/version.py check "$VERSION"
+
+      - name: Build the distributions
+        run: |
+          python -m pip install --upgrade pip build twine
+          python -m build
+          twine check dist/*
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: pypi
+      url: https://pypi.org/p/sector-ai
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      # skip-existing keeps a re-run after a partial failure idempotent; it can
+      # never overwrite a version, which PyPI would reject anyway.
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true
+
+  attach:
+    needs: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Attach the distributions to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPOSITORY: ${{ github.repository }}
+        run: gh release upload "$TAG" dist/* --clobber --repo "$REPOSITORY"
+
+  verify:
+    needs: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install the published version in a clean environment
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#v}"
+          # importlib.metadata reports the PEP 440 form, so 1.4.0-rc.1 becomes
+          # 1.4.0rc1. Compare against that, not against the tag spelling.
+          CANONICAL="$(python3 scripts/version.py canonical "$VERSION")"
+          python3 -m venv "$RUNNER_TEMP/verify"
+          PY="$RUNNER_TEMP/verify/bin/python"
+          for attempt in 1 2 3 4 5; do
+            if "$PY" -m pip install --quiet --disable-pip-version-check "sector-ai==$VERSION" 2>"$RUNNER_TEMP/pip.err"; then
+              break
+            fi
+            if [ "$attempt" = "5" ]; then
+              cat "$RUNNER_TEMP/pip.err" >&2
+              exit 1
+            fi
+            echo "PyPI is not serving $VERSION yet; retrying in 15s"
+            sleep 15
+          done
+          ACTUAL="$("$RUNNER_TEMP/verify/bin/sector-ai" --version)"
+          EXPECTED="sector-ai $CANONICAL"
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "expected '$EXPECTED', got '$ACTUAL'" >&2
+            exit 1
+          fi
+          echo "$ACTUAL installed from PyPI"
