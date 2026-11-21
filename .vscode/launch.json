@@ -7,10 +7,7 @@
       "request": "launch",
       "module": "sector_ai",
       "cwd": "${workspaceFolder}",
-      "args": [
-        "--config",
-        "${workspaceFolder}/config.json"
-      ],
+      "envFile": "${workspaceFolder}/.env",
       "env": {
         "PYTHONPATH": "${workspaceFolder}/src"
       },

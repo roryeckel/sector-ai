@@ -1,6 +1,5 @@
 """Integration tests for /chat and the shared handle_chat path."""
 
-import copy
 from unittest.mock import AsyncMock
 
 import pytest
@@ -11,11 +10,8 @@ from sector_ai.chat import chat_cmd, handle_chat
 
 
 @pytest.fixture
-def quiet_config(sample_config):
-    config = copy.deepcopy(sample_config)
-    config["streaming"]["interval_sec"] = 999
-    config["streaming"]["chunk_size"] = 999_999
-    return config
+def quiet_settings(make_settings):
+    return make_settings(streaming_interval_sec=999, streaming_chunk_size=999_999)
 
 
 class ExplodingModel(BaseChatModel):
@@ -27,8 +23,8 @@ class ExplodingModel(BaseChatModel):
         raise RuntimeError("model unavailable")
 
 
-async def test_handle_chat_streams_and_saves_history(make_context, make_update, quiet_config):
-    context = make_context("hello world", config=quiet_config)
+async def test_handle_chat_streams_and_saves_history(make_context, make_update, quiet_settings):
+    context = make_context("hello world", settings=quiet_settings)
     update = make_update(text="/chat hello")
 
     await handle_chat(update, context)
@@ -39,8 +35,8 @@ async def test_handle_chat_streams_and_saves_history(make_context, make_update, 
     assert [(type(m).__name__, m.content) for m in context.chat_message_history] == [("AIMessage", "hello world")]
 
 
-async def test_handle_chat_strips_ai_prefix(make_context, make_update, quiet_config):
-    context = make_context("AI: the answer is 42", config=quiet_config)
+async def test_handle_chat_strips_ai_prefix(make_context, make_update, quiet_settings):
+    context = make_context("AI: the answer is 42", settings=quiet_settings)
     update = make_update(text="/chat question")
 
     await handle_chat(update, context)
@@ -48,8 +44,8 @@ async def test_handle_chat_strips_ai_prefix(make_context, make_update, quiet_con
     assert context.chat_message_history[-1].content == "the answer is 42"
 
 
-async def test_handle_chat_does_not_save_empty_response(make_context, make_update, quiet_config):
-    context = make_context("", config=quiet_config)
+async def test_handle_chat_does_not_save_empty_response(make_context, make_update, quiet_settings):
+    context = make_context("", settings=quiet_settings)
     update = make_update(text="/chat question")
 
     await handle_chat(update, context)
@@ -57,8 +53,8 @@ async def test_handle_chat_does_not_save_empty_response(make_context, make_updat
     assert list(context.chat_message_history) == []
 
 
-async def test_handle_chat_can_skip_saving(make_context, make_update, quiet_config):
-    context = make_context("summary text", config=quiet_config)
+async def test_handle_chat_can_skip_saving(make_context, make_update, quiet_settings):
+    context = make_context("summary text", settings=quiet_settings)
     update = make_update(text="/summarize")
 
     await handle_chat(update, context, save_ai_message=False)
@@ -76,8 +72,8 @@ async def test_handle_chat_reports_model_error(make_context, make_update):
     assert "model unavailable" in update.message.texts("edit_text")[-1]
 
 
-async def test_prompt_sent_to_model_has_expected_shape(make_context, make_update, quiet_config):
-    context = make_context("hi", config=quiet_config)
+async def test_prompt_sent_to_model_has_expected_shape(make_context, make_update, quiet_settings):
+    context = make_context("hi", settings=quiet_settings)
     context.chat_message_history.append(HumanMessage(name="alice", content="alice: earlier message"))
     update = make_update(text="/chat hello")
 
@@ -116,8 +112,8 @@ async def test_chat_cmd_without_argument_prompts_for_text(make_context, make_upd
     assert context.bot_ollama.call_count == 0
 
 
-async def test_chat_cmd_records_user_message(make_context, make_update, quiet_config):
-    context = make_context("the joke", config=quiet_config)
+async def test_chat_cmd_records_user_message(make_context, make_update, quiet_settings):
+    context = make_context("the joke", settings=quiet_settings)
     update = make_update(text="/chat tell me a joke")
 
     await chat_cmd(update, context)

@@ -44,7 +44,7 @@ def render_svg_png(svg: str, size: int) -> BytesIO:
 async def code_cmd(update: Update, context: SectorContext) -> None:
     system_template_dict = await context.get_system_template_dict()
     template = PromptTemplate(
-        template=context.config_code_system_prompt, input_variables=["input", *system_template_dict.keys()]
+        template=context.settings.system_prompts.code, input_variables=["input", *system_template_dict.keys()]
     )
     chain = template | context.bot_ollama
     code_prompt = update.message.text.split(maxsplit=1)
@@ -69,7 +69,7 @@ async def code_cmd(update: Update, context: SectorContext) -> None:
 async def html_cmd(update: Update, context: SectorContext) -> None:
     system_template_dict = await context.get_system_template_dict()
     template = PromptTemplate(
-        template=context.config_html_system_prompt, input_variables=["input", *system_template_dict.keys()]
+        template=context.settings.system_prompts.html, input_variables=["input", *system_template_dict.keys()]
     )
     chain = template | context.bot_ollama
     html_prompt = update.message.text.split(maxsplit=1)
@@ -96,7 +96,7 @@ async def html_cmd(update: Update, context: SectorContext) -> None:
 async def svg_cmd(update: Update, context: SectorContext) -> None:
     system_template_dict = await context.get_system_template_dict()
     template = PromptTemplate(
-        template=context.config_svg_system_prompt, input_variables=["input", *system_template_dict.keys()]
+        template=context.settings.system_prompts.svg, input_variables=["input", *system_template_dict.keys()]
     )
     chain = template | context.bot_ollama
     svg_prompt = update.message.text.split(maxsplit=1)

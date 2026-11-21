@@ -46,13 +46,13 @@ async def handle_streaming_response(
 
             current_time = asyncio.get_running_loop().time()
             if (
-                current_time - last_update >= context.config_streaming_interval_sec
-                or len(buffer) >= context.config_streaming_chunk_size
+                current_time - last_update >= context.settings.streaming_interval_sec
+                or len(buffer) >= context.settings.streaming_chunk_size
             ):
                 if update_task:
                     if not await update_task:
                         break
-                update_task = asyncio.create_task(update_message(context.config_streaming_cursor or ""))
+                update_task = asyncio.create_task(update_message(context.settings.streaming_cursor or ""))
 
         if update_task:
             await update_task

@@ -15,7 +15,7 @@ async def handle_vision(update: Update, context: SectorContext) -> None:
         return
     old_model = context.get_model()
 
-    vision_prompt = update.message.caption or context.config_vision_system_prompt
+    vision_prompt = update.message.caption or context.settings.system_prompts.vision
 
     logger.info(f"Vision Prompt: {vision_prompt}")
 
@@ -36,7 +36,7 @@ async def handle_vision(update: Update, context: SectorContext) -> None:
     photo_base64s = [base64.b64encode(pb).decode("utf-8") for pb in photo_bytes]
 
     try:
-        context.load_model(context.config_vision_model)
+        context.load_model(context.settings.vision_model)
 
         messages = [
             HumanMessage(

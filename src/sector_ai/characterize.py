@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 async def characterize_cmd(update: Update, context: SectorContext) -> None:
     system_template_dict = await context.get_system_template_dict()
     template = PromptTemplate(
-        template=context.config_characterizer_system_prompt, input_variables=["input", *system_template_dict.keys()]
+        template=context.settings.system_prompts.characterizer, input_variables=["input", *system_template_dict.keys()]
     )
     chain = template | context.bot_ollama
     characterization_prompt = update.message.text.split(maxsplit=1)

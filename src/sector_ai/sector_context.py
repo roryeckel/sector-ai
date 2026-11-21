@@ -9,128 +9,23 @@ from telegram import Message
 from telegram.constants import MessageLimit
 from telegram.ext import Application, CallbackContext
 
+from .settings import Settings
+
 
 class SectorContext(CallbackContext):
     def __init__(self, application: Application, chat_id: Optional[int] = None, user_id: Optional[int] = None):
         super().__init__(application=application, chat_id=chat_id, user_id=user_id)
         self._username = None
 
-    # Ollama Config
+    # Settings
 
     @property
-    def config_ollama_url(self) -> str:
-        try:
-            return self.bot_config["ollama"]["url"]
-        except KeyError:
-            return "http://localhost:11434"
+    def settings(self) -> Settings:
+        return self.bot_data["settings"]
 
-    @property
-    def config_ollama_timeout(self) -> int:
-        return self.bot_config["ollama"]["timeout"]
-
-    @property
-    def config_ollama_headers(self) -> dict:
-        return self.bot_config.get("ollama", {}).get("headers", {})
-
-    @property
-    def config_ollama_context_length(self) -> int | None:
-        return self.bot_config["ollama"].get("context_length", None)
-
-    @property
-    def config_ollama_disallowed_models(self) -> list:
-        return self.bot_config["ollama"]["disallowed_models"]
-
-    # System Prompt Config
-
-    @property
-    def config_default_system_prompt(self) -> str:
-        return self.bot_config["system_prompts"]["default"]
-
-    @property
-    def config_summarization_system_prompt(self) -> str:
-        return self.bot_config["system_prompts"]["summarization"]
-
-    @property
-    def config_emoji_system_prompt(self) -> str:
-        return self.bot_config["system_prompts"]["emoji"]
-
-    @property
-    def config_basic_poll_system_prompt(self) -> str:
-        return self.bot_config["system_prompts"]["basic_poll"]
-
-    @property
-    def config_topic_poll_system_prompt(self) -> str:
-        return self.bot_config["system_prompts"]["topic_poll"]
-
-    @property
-    def config_characterizer_system_prompt(self) -> str:
-        return self.bot_config["system_prompts"]["characterizer"]
-
-    @property
-    def config_code_system_prompt(self) -> str:
-        return self.bot_config["system_prompts"]["code"]
-
-    @property
-    def config_html_system_prompt(self) -> str:
-        return self.bot_config["system_prompts"]["html"]
-
-    @property
-    def config_svg_system_prompt(self) -> str:
-        return self.bot_config["system_prompts"]["svg"]
-
-    @property
-    def config_decide_system_prompt(self) -> str:
-        return self.bot_config["system_prompts"]["decide"]
-
-    @property
-    def config_decide_autoreply_system_prompt(self) -> str:
-        return self.bot_config["system_prompts"]["decide_autoreply"]
-
-    @property
-    def config_vision_system_prompt(self) -> str:
-        return self.bot_config["system_prompts"]["vision"]
-
-    # Streaming Config
-
-    @property
-    def config_streaming_cursor(self) -> str:
-        return self.bot_config["streaming"]["cursor"]
-
-    @property
-    def config_streaming_interval_sec(self) -> int:
-        return self.bot_config["streaming"]["interval_sec"]
-
-    @property
-    def config_streaming_chunk_size(self) -> int:
-        return self.bot_config["streaming"]["chunk_size"]
-
-    # Misc Config
-
-    @property
-    def config_default_svg_size(self) -> int:
-        return self.bot_config["default_svg_size"]
-
-    @property
-    def config_default_model(self) -> str:
-        return self.bot_config["default_model"]
-
-    @property
-    def config_vision_model(self) -> str:
-        return self.bot_config["vision_model"]
-
-    @property
-    def config_admin_usernames(self) -> list:
-        return self.bot_config["admin_usernames"]
-
-    # Bot
-
-    @property
-    def bot_config(self) -> dict:
-        return self.bot_data["config"]
-
-    @bot_config.setter
-    def bot_config(self, new_config: dict) -> None:
-        self.bot_data["config"] = new_config
+    @settings.setter
+    def settings(self, new_settings: Settings) -> None:
+        self.bot_data["settings"] = new_settings
 
     @property
     def bot_ollama(self) -> ChatOllama:
@@ -146,7 +41,7 @@ class SectorContext(CallbackContext):
         try:
             return self.chat_data["system_prompt"]
         except KeyError:
-            return self.config_default_system_prompt
+            return self.settings.system_prompts.default
 
     @chat_system_prompt.setter
     def chat_system_prompt(self, new_prompt: str) -> None:
@@ -181,7 +76,7 @@ class SectorContext(CallbackContext):
         try:
             return self.chat_data["svg_size"]
         except KeyError:
-            default_svg_size = self.config_default_svg_size
+            default_svg_size = self.settings.default_svg_size
             self.chat_data["svg_size"] = default_svg_size
             return default_svg_size
 
@@ -200,10 +95,10 @@ class SectorContext(CallbackContext):
 
     def load_model(self, model_name=None) -> ChatOllama:
         result = ChatOllama(
-            model=model_name or self.config_default_model,
-            base_url=self.config_ollama_url,
-            num_ctx=self.config_ollama_context_length,
-            client_kwargs={"timeout": self.config_ollama_timeout, "headers": self.config_ollama_headers},
+            model=model_name or self.settings.default_model,
+            base_url=self.settings.ollama_url,
+            num_ctx=self.settings.ollama_context_length,
+            client_kwargs={"timeout": self.settings.ollama_timeout, "headers": self.settings.ollama_headers},
         )
         self.bot_data["ollama"] = result
         return result
@@ -213,7 +108,9 @@ class SectorContext(CallbackContext):
 
     def get_model_details(self) -> dict:
         response = requests.post(
-            f"{self.config_ollama_url}/api/show", headers=self.config_ollama_headers, json={"name": self.get_model()}
+            f"{self.settings.ollama_url}/api/show",
+            headers=self.settings.ollama_headers,
+            json={"name": self.get_model()},
         )
         if response.ok:
             result = response.json()
@@ -226,15 +123,17 @@ class SectorContext(CallbackContext):
             return {}
 
     def get_models(self) -> list:
-        response = requests.get(f"{self.config_ollama_url}/api/tags", headers=self.config_ollama_headers)
+        response = requests.get(f"{self.settings.ollama_url}/api/tags", headers=self.settings.ollama_headers)
         if response.ok:
             data = response.json()
             result = data["models"]
-            result = [r for r in result if r["model"] not in self.config_ollama_disallowed_models]
+            result = [r for r in result if r["model"] not in self.settings.ollama_disallowed_models]
 
             for r in result:
                 show_response = requests.post(
-                    f"{self.config_ollama_url}/api/show", headers=self.config_ollama_headers, json={"name": r["model"]}
+                    f"{self.settings.ollama_url}/api/show",
+                    headers=self.settings.ollama_headers,
+                    json={"name": r["model"]},
                 )
 
                 if show_response.ok:
@@ -242,7 +141,7 @@ class SectorContext(CallbackContext):
                     r.update(show_data)
 
                 r["is_default_active"] = r["model"] == self.get_model()
-                r["is_vision_active"] = r["model"] == self.config_vision_model
+                r["is_vision_active"] = r["model"] == self.settings.vision_model
                 r["label"] = (
                     f"{'✅ ' if r['is_default_active'] else ''}{'👁️‍🗨️ ' if r['is_vision_active'] else ''}{r['model']}"
                 )
