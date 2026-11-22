@@ -29,7 +29,7 @@ async def poll_cmd(update: Update, context: SectorContext) -> None:
         input_variables=["query", *system_template_dict.keys()],
         partial_variables={"format_instructions": parser.get_format_instructions()},
     )
-    chain = template | context.bot_ollama | parser
+    chain = template | context.bot_llm | parser
     poll_prompt = update.message.text.split(maxsplit=1)
     if len(poll_prompt) <= 1:
         await update.message.reply_text("No prompt provided.")

@@ -21,16 +21,17 @@ class TopicPoll(BaseModel):
 
 
 async def topic_poll_cmd(update: Update, context: SectorContext) -> None:
-    context.bot_ollama.format = "json"
     system_template_dict = await context.get_system_template_dict()
     parser = PydanticOutputParser(pydantic_object=TopicPoll)
     prompt_template = context.get_templated_messages(system_prompt=context.settings.system_prompts.topic_poll)
-    chain = prompt_template | context.bot_ollama | parser
+    # ChatOllama converts this to its native JSON mode; ChatOpenAI uses
+    # response_format on Chat Completions and text.format on Responses.
+    json_model = context.bot_llm.bind(response_format={"type": "json_object"})
+    chain = prompt_template | json_model | parser
     poll_response = await chain.ainvoke(
         {"format_instructions": parser.get_format_instructions(), **system_template_dict}
     )
     logger.info(f"Topic Poll Response: {poll_response}")
-    context.bot_ollama.format = ""
 
     if not (PollLimit.MIN_OPTION_NUMBER <= len(poll_response.topics) <= PollLimit.MAX_OPTION_NUMBER):
         logger.error(f"Poll Error: Invalid number of topics: {len(poll_response.topics)}")

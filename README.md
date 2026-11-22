@@ -5,29 +5,63 @@
 [![Docker](https://img.shields.io/github/v/release/roryeckel/sector-ai?label=ghcr.io&logo=docker&logoColor=white&color=2496ED)](https://github.com/roryeckel/sector-ai/pkgs/container/sector-ai)
 [![License](https://img.shields.io/github/license/roryeckel/sector-ai.svg)](https://github.com/roryeckel/sector-ai/blob/master/LICENSE)
 
-This repository contains the implementation of the Sector AI Telegram Bot, an advanced chatbot designed to interact with users on Telegram. The secret sauce is LangChain. The bot supports various functionalities, including autoreply decision-making, structured output parsing for polls, multimodal image processing, emoji responses, code generation, and more. Below is a detailed description of all components of this repository.
+Sector AI is a Telegram bot that brings a chat model into your conversations. The secret sauce is LangChain. It supports autoreply decision-making, structured output parsing for polls, multimodal image processing, emoji responses, code generation, and more.
 
-### Installing Ollama
+## Backends
 
-To download and manage the recommended models, you will need to install Ollama. Follow these steps to install Ollama and download the models:
+The bot runs on either of two backends. Both are first-class: streaming replies, vision, autoreply decisions, model switching and token counting all work the same.
 
-1. **Install Ollama**:
-    https://ollama.com/download
+- **Ollama** (default) — Ollama's native API.
+- **OpenAI-compatible** — Chat Completions against any `/v1` endpoint: LM Studio, vLLM, llama.cpp, OpenRouter, OpenAI itself, or your own inference server.
 
-2. **Download the recommended models**:
-    ```sh
-    ollama pull llama3.2-vision:11b-instruct-fp16
-    ```
+No models are bundled. Point the bot at a server you already run and set `SECTOR_AI_DEFAULT_MODEL` (and `SECTOR_AI_VISION_MODEL` for photos) to a model it serves. Vision commands need a multimodal model; the rest works with any text model that can follow structured output.
 
-Make sure you have enough storage space and a stable internet connection to download these models.
+### Ollama
 
-## Recommended Models
-- Llama 3.2
-- Gemma 2
-- Qwen 2.5
-- Phi 4
-- Mistral Nemo or Small
-- Almost anything will work for the basics. However, some models aren't powerful enough for the structured output parsing involved in autoreply, decision, poll, and topic commands.
+Install [Ollama](https://ollama.com/download), then pull a model:
+
+```sh
+ollama pull <model>
+```
+
+`SECTOR_AI_LLM_PROVIDER` defaults to `ollama`, so nothing else needs enabling. Set `SECTOR_AI_DEFAULT_MODEL` to the model you pulled, or let an admin pick one at runtime with `/models`.
+
+### OpenAI-compatible
+
+Set the provider and point the bot at the server's `/v1` root:
+
+```sh
+SECTOR_AI_LLM_PROVIDER=openai
+SECTOR_AI_OPENAI_BASE_URL=https://your-server.example/v1
+SECTOR_AI_OPENAI_API_KEY=...
+```
+
+The URL must include `/v1`. Leave the key empty for a server that does not check one; the bot sends `dummy`. Use the server's own model names in `SECTOR_AI_DEFAULT_MODEL` and `SECTOR_AI_VISION_MODEL`, for example `vendor/model` on OpenRouter.
+
+| Server | `SECTOR_AI_OPENAI_BASE_URL` |
+| --- | --- |
+| Ollama | `http://localhost:11434/v1` |
+| LM Studio | `http://localhost:1234/v1` |
+| vLLM | `http://localhost:8000/v1` |
+| llama.cpp | `http://localhost:8080/v1` |
+| OpenRouter | `https://openrouter.ai/api/v1` |
+| OpenAI | `https://api.openai.com/v1` |
+
+Ollama also has an OpenAI-compatible `/v1` route, so switching that server to the `openai` provider is only a URL and provider change.
+
+### Context length
+
+Context length is set on the server. For Ollama, use `OLLAMA_CONTEXT_LENGTH` in its environment or `PARAMETER num_ctx` in a Modelfile; for other servers use their equivalent, such as vLLM's `--max-model-len`.
+
+The bot reads the window the server advertises, so `/tokens` can show a percentage and compaction knows when to run. It checks, in order: `SECTOR_AI_CONTEXT_LENGTH` when set above zero, then the model's own metadata (`/v1/models` `context_length` or `max_model_len`, Ollama's `/api/ps` or `/api/show`), then a conservative 8192. The lookup happens once per endpoint and model, not on every message.
+
+### Context compaction
+
+Instead of dropping the oldest messages at a fixed count, the bot keeps a running summary. When the next request would pass `SECTOR_AI_COMPACTION_THRESHOLD` of the context window, the oldest messages are folded into the summary and only the most recent `SECTOR_AI_COMPACTION_KEEP_MESSAGES` stay verbatim. The summary is sent as a second system message, so a custom system prompt keeps working.
+
+Compaction uses the model server itself, so it works the same on every backend. OpenAI's native Responses compaction is not used: it returns an opaque item that is only valid on that API, and most compatible servers, including Ollama and most self-hosted ones, do not implement it.
+
+If summarization fails, the transcript is left alone and the bot keeps chatting; the history is still bounded by `SECTOR_AI_COMPACTION_MAX_MESSAGES` as a safety net. `/compact` (admin only) forces a compaction and reports the token change.
 
 ## Features
 
@@ -73,9 +107,13 @@ This project uses the `python-telegram-bot` library, with various command handle
 - **Description**: Creates an SVG graphic according to detailed descriptions provided by users, often with humorous or nonsensical results.
 - **Usage**: `/svg [description]` (where `[description]` can be anything from a simple shape to a complex scene)
 
-### Get Current Context Length (`/tokens`)
-- **Description**: Checks the current length of the chat context in terms of tokens used, which could be relevant for understanding memory or performance constraints.
+### Get the Current Context Size (`/tokens`) (Admin Only)
+- **Description**: Counts the system prompt and current chat history with the model server's tokenizer when available, so messages that have not been processed yet are included. On an OpenAI-compatible server it first uses OpenAI's free `/responses/input_tokens` endpoint, which counts the Responses API input and can differ slightly from a Chat Completions request. If that endpoint is missing, it falls back to a one-token probe for the exact chat count; on a paid endpoint that probe sends the whole prompt as a normal request. The result is cached until the context or model changes. If the server reports no count, the reply is marked as an estimate. When the server also reports its context window, the reply shows the count as a percentage of it. Ollama can truncate a prompt that exceeds the server's context window, so the reported number is then a lower bound.
 - **Usage**: `/tokens`
+
+### Compact the Context (`/compact`) (Admin Only)
+- **Description**: Folds the older messages into the running summary immediately, keeps the most recent messages verbatim, and reports the token count before and after. Normally runs on its own before a reply; this command is for testing or for shrinking the context on demand.
+- **Usage**: `/compact`
 
 ### Toggle Automatic Replies (`/autoreply`)
 - **Description**: Enables or disables automatic replies triggered by the LLM decision. When enabled, the bot will automatically respond to user messages and images.
@@ -98,7 +136,7 @@ This project uses the `python-telegram-bot` library, with various command handle
 - **Usage**: `/characterize [details]` where `[details]` are a thing for the LLM to roleplay as.
 
 ### Set the Model (Admin Only) (`/models`)
-- **Description**: Allows administrators to switch or configure different AI models used by the bot, which can affect response quality and style.
+- **Description**: Lists available models in pages of 40 and switches the bot to the selected one. Use `/models 2` to open a later page directly.
 
 ## Getting Started
 
@@ -108,7 +146,7 @@ This project uses the `python-telegram-bot` library, with various command handle
 pip install sector-ai
 ```
 
-Create a `.env` in the directory you will run from, or export the variables directly. The [Configuration](#configuration) table lists every setting; at minimum you need `TELEGRAM_BOT_TOKEN` and a reachable Ollama.
+Create a `.env` in the directory you will run from, or export the variables directly. The [Configuration](#configuration) table lists every setting; at minimum you need `TELEGRAM_BOT_TOKEN` and a reachable [backend](#backends).
 
 ```sh
 sector-ai
@@ -118,14 +156,14 @@ sector-ai
 
 ### From a clone
 
-1. **Prerequisites**: Python 3.11 or newer, and Ollama running (see above).
+1. **Prerequisites**: Python 3.11 or newer and one reachable [backend](#backends) — Ollama or any OpenAI-compatible server.
 2. **Clone and install**:
     ```sh
     git clone https://github.com/roryeckel/sector-ai.git
     cd sector-ai
     pip install .
     ```
-3. **Configure**: copy `.env.example` to `.env` and set at least `TELEGRAM_BOT_TOKEN`.
+3. **Configure**: copy `.env.example` to `.env`, then set `TELEGRAM_BOT_TOKEN` and the backend and model values you need.
 4. **Run**: `sector-ai`
 
 Upgrading from 1.3.x: the `--config` flag and `config.json` are gone. Move the values you had changed into `.env`; `.env.example` lists every setting and its default.
@@ -133,6 +171,8 @@ Upgrading from 1.3.x: the `--config` flag and `config.json` are gone. Move the v
 ## Docker
 
 Images are published to the GitHub Container Registry for `linux/amd64` and `linux/arm64`. The bot makes no inbound connections, so no ports are exposed.
+
+The example below reaches Ollama on the host. For an OpenAI-compatible server, add `-e SECTOR_AI_LLM_PROVIDER=openai -e SECTOR_AI_OPENAI_BASE_URL=http://host.docker.internal:11434/v1` (or the server's public `/v1` URL), plus `-e SECTOR_AI_OPENAI_API_KEY=...` if it checks one.
 
 ```sh
 docker run -d --name sector-ai --restart unless-stopped \
@@ -149,7 +189,7 @@ cp .env.example .env   # set TELEGRAM_BOT_TOKEN and OLLAMA_URL
 docker compose up -d
 ```
 
-Inside the container, `localhost` is the container itself, so Ollama on the host needs `host.docker.internal` (Docker Desktop resolves it automatically; the `--add-host` flag or the `extra_hosts` entry in `compose.yaml` covers Linux).
+Inside the container, `localhost` is the container itself, so a server on the host needs `host.docker.internal` (Docker Desktop resolves it automatically; the `--add-host` flag or the `extra_hosts` entry in `compose.yaml` covers Linux). A remote OpenAI-compatible server needs no special host entry — set `SECTOR_AI_OPENAI_BASE_URL` to its public URL.
 
 Image tags:
 
@@ -168,21 +208,32 @@ There is no configuration file. Settings come from environment variables, an opt
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `TELEGRAM_BOT_TOKEN` | *required* | Token from [@BotFather](https://t.me/BotFather). `SECTOR_AI_TELEGRAM_BOT_TOKEN` is also accepted. |
-| `OLLAMA_URL` | `http://localhost:11434` | Ollama endpoint. `SECTOR_AI_OLLAMA_URL` is also accepted. |
-| `SECTOR_AI_DEFAULT_MODEL` | `llama3.2-vision:11b-instruct-fp16` | Model loaded at start-up. |
-| `SECTOR_AI_VISION_MODEL` | `llama3.2-vision:11b-instruct-fp16` | Model used for photos. |
+| `SECTOR_AI_LLM_PROVIDER` | `ollama` | Backend: `ollama` for the native API, or `openai` for any OpenAI-compatible endpoint. |
+| `OLLAMA_URL` | `http://localhost:11434` | Ollama endpoint, used by the `ollama` provider. `SECTOR_AI_OLLAMA_URL` is also accepted. |
+| `SECTOR_AI_OPENAI_BASE_URL` | `http://localhost:11434/v1` | Base URL for the `openai` provider; must include `/v1`. |
+| `SECTOR_AI_OPENAI_API_KEY` | *empty* | Key for the `openai` provider. Empty sends `dummy`, which local servers ignore. |
+| `SECTOR_AI_DEFAULT_MODEL` | `llama3.2-vision:11b-instruct-fp16` | Chat model at start-up. Set it to a model the backend serves. |
+| `SECTOR_AI_VISION_MODEL` | `llama3.2-vision:11b-instruct-fp16` | Model used for photos; must accept images. |
 | `SECTOR_AI_ADMIN_USERNAMES` | `ex0dus` | Comma separated usernames allowed to use admin commands. |
 | `SECTOR_AI_DEFAULT_SVG_SIZE` | `250` | Base size for `/svg`; the rendered PNG is twice this. |
 | `SECTOR_AI_STREAMING_CURSOR` | `🦙` | Cursor shown while a reply streams. |
 | `SECTOR_AI_STREAMING_INTERVAL_SEC` | `0.7` | Minimum seconds between Telegram edits. |
 | `SECTOR_AI_STREAMING_CHUNK_SIZE` | `150` | Characters buffered before an edit. |
-| `SECTOR_AI_OLLAMA_TIMEOUT` | `200.0` | Request timeout in seconds. |
-| `SECTOR_AI_OLLAMA_CONTEXT_LENGTH` | `2048` | `num_ctx` passed to Ollama; set to `null` (or leave it empty) to leave it to the model. |
-| `SECTOR_AI_OLLAMA_DISALLOWED_MODELS` | *empty* | Comma separated models hidden from `/models`. |
-| `SECTOR_AI_OLLAMA_HEADERS` | `{}` | JSON object of extra HTTP headers for Ollama. |
+| `SECTOR_AI_LLM_TIMEOUT` | `200.0` | Request timeout in seconds. `SECTOR_AI_OLLAMA_TIMEOUT` is also accepted. |
+| `SECTOR_AI_LLM_DISALLOWED_MODELS` | *empty* | Comma separated models hidden from `/models`. `SECTOR_AI_OLLAMA_DISALLOWED_MODELS` is also accepted. |
+| `SECTOR_AI_LLM_HEADERS` | `{}` | JSON object of extra HTTP headers. `SECTOR_AI_OLLAMA_HEADERS` is also accepted. |
+| `SECTOR_AI_CONTEXT_LENGTH` | `0` | Context window in tokens. `0` detects it from the server and falls back to 8192. |
+| `SECTOR_AI_COMPACTION_ENABLED` | `true` | Fold old messages into a summary instead of dropping them. |
+| `SECTOR_AI_COMPACTION_THRESHOLD` | `0.75` | Share of the context window that triggers a compaction. |
+| `SECTOR_AI_COMPACTION_KEEP_MESSAGES` | `8` | Recent messages kept verbatim after a compaction. |
+| `SECTOR_AI_COMPACTION_MAX_MESSAGES` | `500` | Safety cap used when compaction is off or fails. |
 | `SECTOR_AI_SYSTEM_PROMPTS__<NAME>` | built-in | Override one system prompt, e.g. `SECTOR_AI_SYSTEM_PROMPTS__SVG`. |
 | `SECTOR_AI_LOG_LEVEL` | `INFO` | `CRITICAL`, `ERROR`, `WARNING`, `INFO` or `DEBUG`. |
 
-The flags worth changing per run are also on the command line: `--model`, `--vision-model`, `--ollama-url`, `--admin` (repeatable), `--log-level` and `--version`. Secrets are intentionally environment-only, so a bot token never lands in shell history or `ps` output.
+Context length is detected from the server when possible; see [Context length](#context-length) and [Context compaction](#context-compaction).
+
+**Upgrading:** `SECTOR_AI_OLLAMA_CONTEXT_LENGTH` is no longer read. Remove it and configure the context length on the Ollama server or in a Modelfile.
+
+The flags worth changing per run are also on the command line: `--model`, `--vision-model`, `--provider`, `--ollama-url`, `--openai-url`, `--admin` (repeatable), `--log-level` and `--version`. Secrets are intentionally environment-only, so a bot token or API key never lands in shell history or `ps` output.
 
 ## Contributions Welcome

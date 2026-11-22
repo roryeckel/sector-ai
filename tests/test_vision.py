@@ -14,7 +14,7 @@ async def test_vision_streams_and_records_history(make_context, make_update, mak
 
     def load_model(name=None):
         loads.append(name)
-        context.bot_data["ollama"] = model
+        context.bot_data["llm"] = model
         return model
 
     monkeypatch.setattr(context, "load_model", load_model)
@@ -35,10 +35,10 @@ async def test_vision_sends_text_and_image_parts(make_context, make_update, make
     await handle_vision(update, context)
 
     sent = model.received[0][0]
-    assert [part["type"] for part in sent.content] == ["text", "image_url"]
+    assert [part["type"] for part in sent.content] == ["text", "image"]
     assert sent.content[0]["text"] == "describe this"
     expected = base64.b64encode(b"image-bytes").decode("utf-8")
-    assert sent.content[1]["image_url"] == f"data:image/jpeg;base64,{expected}"
+    assert sent.content[1] == {"type": "image", "base64": expected, "mime_type": "image/jpeg"}
 
 
 async def test_vision_uses_default_prompt_without_caption(
@@ -98,7 +98,7 @@ async def test_vision_reports_load_errors(make_context, make_update, make_photo,
         calls.append(name)
         if len(calls) == 1:
             raise RuntimeError("vision down")
-        context.bot_data["ollama"] = model
+        context.bot_data["llm"] = model
         return model
 
     monkeypatch.setattr(context, "load_model", load_model)

@@ -5,11 +5,11 @@ Two styles are supported:
 * ``mock_context`` / ``mock_update`` - fast ``MagicMock`` stand-ins, used by the
   pure logic tests that only need to verify branching.
 * ``make_context`` / ``make_update`` - a real ``SectorContext`` over in-memory
-  application stores plus a ``FakeOllamaModel``, used by the integration tests
+  application stores plus a ``FakeChatModel``, used by the integration tests
   that assert on the prompt going in and the payloads going out.
 """
 
-from collections import defaultdict, deque
+from collections import defaultdict
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
@@ -52,7 +52,7 @@ def mock_context(sample_settings):
     # bot_data / chat_data backing stores
     ctx.bot_data = {"settings": sample_settings}
     ctx.settings = sample_settings
-    chat_data = {"message_history": deque(maxlen=15), "autoreply_mode": True}
+    chat_data = {"message_history": [], "autoreply_mode": True}
     ctx.chat_data = chat_data
 
     # Chat properties backed by chat_data
@@ -65,8 +65,8 @@ def mock_context(sample_settings):
     # Async methods
     ctx.get_system_template_dict = AsyncMock(return_value={"MAX_LEN": 4096, "USERNAME": "testbot"})
 
-    # bot_ollama
-    ctx.bot_ollama = MagicMock(model="test-model")
+    # bot_llm
+    ctx.bot_llm = MagicMock(model="test-model")
 
     return ctx
 
@@ -89,28 +89,30 @@ def mock_update():
 # --- Fake LLM -------------------------------------------------------------
 
 
-class FakeOllamaModel(GenericFakeChatModel):
-    """``GenericFakeChatModel`` with the ``ChatOllama`` fields the bot touches.
+class FakeChatModel(GenericFakeChatModel):
+    """``GenericFakeChatModel`` with the fields the bot reads or assigns.
 
     ``GenericFakeChatModel`` streams by splitting each message on whitespace,
     which is exactly what the streaming tests need. The extra fields mirror the
-    subset of ``ChatOllama`` that ``SectorContext`` and the commands read or
-    assign (``model``, ``temperature``, ``format``).
+    part of the chat integrations that ``SectorContext`` and the commands read
+    (``model`` and ``temperature``).
     """
 
     model: str = "fake-model"
     temperature: float | None = None
-    format: str = ""
     received: list[list[Any]] = []
+    received_kwargs: list[dict] = []
     call_count: int = 0
 
     def _generate(self, messages, stop=None, run_manager=None, **kwargs):
         self.received.append(list(messages))
+        self.received_kwargs.append(dict(kwargs))
         self.call_count += 1
         return super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
 
     def _stream(self, messages, stop=None, run_manager=None, **kwargs):
         self.received.append(list(messages))
+        self.received_kwargs.append(dict(kwargs))
         self.call_count += 1
         yield from super()._stream(messages, stop=stop, run_manager=run_manager, **kwargs)
 
@@ -123,9 +125,9 @@ class FakeOllamaModel(GenericFakeChatModel):
 def fake_model():
     """Build a fake model that answers with the given contents, in order."""
 
-    def _make(*contents: str, **kwargs) -> FakeOllamaModel:
-        messages = [AIMessage(content=c) for c in (contents or ("",))]
-        return FakeOllamaModel(messages=iter(messages), **kwargs)
+    def _make(*contents: str, usage_metadata=None, **kwargs) -> FakeChatModel:
+        messages = [AIMessage(content=c, usage_metadata=usage_metadata) for c in (contents or ("",))]
+        return FakeChatModel(messages=iter(messages), **kwargs)
 
     return _make
 
@@ -278,7 +280,10 @@ def make_application(settings, model=None, bot_id: int = 42, username: str = "te
 
     bot_data = {"settings": settings}
     if model is not None:
-        bot_data["ollama"] = model
+        bot_data["llm"] = model
+        name = getattr(model, "model", None) or getattr(model, "model_name", None)
+        if isinstance(name, str):
+            bot_data["model_name"] = name
 
     # telegram.ext.Application keeps these as defaultdict(dict); a plain dict
     # raises KeyError from CallbackContext.chat_data before the bot sees it.

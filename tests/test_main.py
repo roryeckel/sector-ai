@@ -28,6 +28,7 @@ EXPECTED_COMMANDS = {
     "temperature",
     "models",
     "tokens",
+    "compact",
     "autoreply",
 }
 
@@ -124,7 +125,17 @@ async def test_error_handler_reports_to_message(make_context, make_update):
     await error_handler(update, context)
 
     assert update.message.texts("reply_text") == ["boom"]
-    assert context.chat_message_history[-1].content == "boom"
+    assert list(context.chat_message_history) == []
+
+
+async def test_error_handler_survives_a_missing_update(make_context):
+    context = make_context("unused")
+    context.error = ValueError("boom")
+    context.bot.answer_callback_query = AsyncMock()
+
+    await error_handler(None, context)  # must not raise
+
+    assert list(context.chat_message_history) == []
 
 
 async def test_error_handler_reports_to_callback_query(make_context):
@@ -145,7 +156,7 @@ async def test_error_handler_swallows_bad_request(make_context, make_update):
 
     await error_handler(update, context)  # must not raise
 
-    assert context.chat_message_history[-1].content == "boom"
+    assert list(context.chat_message_history) == []
 
 
 class FakeApplication:
@@ -161,7 +172,7 @@ class FakeApplication:
     def add_error_handler(self, handler):
         self.error_handler = handler
 
-    def run_polling(self):
+    def run_polling(self, bootstrap_retries=0):
         self.polling = True
 
 
@@ -217,13 +228,13 @@ def test_main_reports_missing_token_without_traceback(tmp_path, monkeypatch, cap
 def test_main_reports_malformed_environment_without_traceback(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:abc")
-    monkeypatch.setenv("SECTOR_AI_OLLAMA_HEADERS", "not-json")
+    monkeypatch.setenv("SECTOR_AI_LLM_HEADERS", "not-json")
 
     with pytest.raises(SystemExit) as exit_info:
         entrypoint.main([])
 
     assert exit_info.value.code == 2
-    assert "ollama_headers" in capsys.readouterr().err
+    assert "llm_headers" in capsys.readouterr().err
 
 
 def test_main_cli_overrides_environment(tmp_path, monkeypatch):
@@ -233,13 +244,32 @@ def test_main_cli_overrides_environment(tmp_path, monkeypatch):
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:abc")
     monkeypatch.setenv("SECTOR_AI_DEFAULT_MODEL", "env-model")
     monkeypatch.setenv("SECTOR_AI_ADMIN_USERNAMES", "envadmin,someone")
+    monkeypatch.setenv("SECTOR_AI_LLM_PROVIDER", "ollama")
+    monkeypatch.setenv("SECTOR_AI_OPENAI_BASE_URL", "http://env:1234/v1")
 
-    entrypoint.main(["--model", "cli-model", "--admin", "cliadmin", "--admin", "other", "--log-level", "debug"])
+    entrypoint.main(
+        [
+            "--model",
+            "cli-model",
+            "--admin",
+            "cliadmin",
+            "--admin",
+            "other",
+            "--log-level",
+            "debug",
+            "--provider",
+            "OpenAI",
+            "--openai-url",
+            "http://lmstudio:1234/v1",
+        ]
+    )
 
     settings = application.bot_data["settings"]
     assert settings.default_model == "cli-model"
     assert settings.admin_usernames == ["cliadmin", "other"]
     assert settings.log_level == "DEBUG"
+    assert settings.llm_provider == "openai"
+    assert settings.openai_base_url == "http://lmstudio:1234/v1"
 
 
 def test_version_flag_prints_version(monkeypatch, capsys):

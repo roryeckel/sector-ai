@@ -92,8 +92,8 @@ def test_formatter_output_is_identical_without_a_token():
     plain = logging.Formatter(LOG_FORMAT)
     redacting = TokenRedactingFormatter(LOG_FORMAT, token=TOKEN)
 
-    msg = "Decision: True"
-    assert redacting.format(make_record(msg)) == plain.format(make_record(msg))
+    record = make_record("Decision: True")
+    assert redacting.format(record) == plain.format(record)
 
 
 # --- configure_logging ---

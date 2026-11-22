@@ -5,6 +5,7 @@ from collections.abc import AsyncIterator
 
 from telegram import Message
 
+from .message_text import message_text
 from .sector_context import SectorContext
 
 logger = logging.getLogger(__name__)
@@ -18,6 +19,9 @@ async def handle_streaming_response(
     last_sent = None
     last_update = asyncio.get_running_loop().time()
     update_task = None
+    saw_chunk = False
+    ended_with_falsy = False
+    finish_reason = None
     buffer_lock = asyncio.Lock()
 
     async def update_message(message_postfix: str = "") -> bool:
@@ -40,10 +44,14 @@ async def handle_streaming_response(
     try:
         async for chunk in stream_generator:
             if not chunk:
+                ended_with_falsy = True
                 break
 
+            saw_chunk = True
+            metadata = getattr(chunk, "response_metadata", None) or {}
+            finish_reason = metadata.get("normalized_finish_reason") or metadata.get("finish_reason") or finish_reason
             async with buffer_lock:
-                buffer += chunk.content
+                buffer += message_text(chunk)
 
             current_time = asyncio.get_running_loop().time()
             if (
@@ -59,6 +67,13 @@ async def handle_streaming_response(
             await update_task
 
         await update_message()
+
+        if not response.strip() and (saw_chunk or not ended_with_falsy):
+            if finish_reason == "refusal":
+                await response_message.edit_text("The model refused the request.")
+            else:
+                await response_message.edit_text("The model returned an empty response.")
+            logger.warning("%s returned no text", log_prefix)
 
         logger.info(f"{log_prefix} Result: {response}")
         return response

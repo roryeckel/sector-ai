@@ -3,6 +3,7 @@
 from types import SimpleNamespace
 
 import pytest
+from langchain_core.messages import AIMessageChunk
 
 from sector_ai.streaming_handler import handle_streaming_response
 
@@ -96,6 +97,59 @@ async def test_falsy_chunk_ends_stream(make_context, recording_message):
 
     assert response == ""
     assert message.calls_to("edit_text") == []
+
+
+async def test_streaming_handles_content_blocks(make_context, recording_message):
+    context = make_context()
+    message = recording_message()
+    chunk = AIMessageChunk(content=[{"type": "text", "text": "hello"}])
+
+    response = await handle_streaming_response(context, message, aiter_chunks([chunk]), "Chat")
+
+    assert response == "hello"
+    assert message.texts("edit_text") == ["hello"]
+
+
+async def test_streaming_handles_refusal_blocks(make_context, recording_message):
+    context = make_context()
+    message = recording_message()
+    chunk = AIMessageChunk(content=[{"type": "refusal", "refusal": "I cannot help with that."}])
+
+    response = await handle_streaming_response(context, message, aiter_chunks([chunk]), "Chat")
+
+    assert response == "I cannot help with that."
+    assert message.texts("edit_text") == ["I cannot help with that."]
+
+
+async def test_streaming_reports_an_empty_response(make_context, recording_message):
+    context = make_context()
+    message = recording_message()
+
+    response = await handle_streaming_response(context, message, aiter_chunks([AIMessageChunk(content="")]), "Chat")
+
+    assert response == ""
+    assert message.texts("edit_text")[-1] == "The model returned an empty response."
+
+
+async def test_empty_stream_reports_no_response(make_context, recording_message):
+    context = make_context()
+    message = recording_message()
+
+    response = await handle_streaming_response(context, message, aiter_chunks([]), "Chat")
+
+    assert response == ""
+    assert message.texts("edit_text")[-1] == "The model returned an empty response."
+
+
+async def test_streaming_reports_a_refusal_finish(make_context, recording_message):
+    context = make_context()
+    message = recording_message()
+    chunk = AIMessageChunk(content="", response_metadata={"normalized_finish_reason": "refusal"})
+
+    response = await handle_streaming_response(context, message, aiter_chunks([chunk]), "Chat")
+
+    assert response == ""
+    assert message.texts("edit_text")[-1] == "The model refused the request."
 
 
 async def test_pending_update_cancelled_on_error(make_context, recording_message, fast_settings):

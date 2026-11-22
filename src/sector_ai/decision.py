@@ -26,7 +26,7 @@ async def make_decision(prompt: str, context: SectorContext, partial_variables=N
         input_variables=["input", *system_template_dict.keys(), *partial_variables.keys()],
         partial_variables={"format_instructions": parser.get_format_instructions(), **partial_variables},
     )
-    chain = template | context.bot_ollama | parser
+    chain = template | context.bot_llm | parser
     logger.info(f"Decide Prompt: {prompt}")
     try:
         decision = await chain.ainvoke({"input": prompt, **system_template_dict})

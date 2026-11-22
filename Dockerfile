@@ -25,4 +25,6 @@ USER sector
 
 # Configuration is environment-only, so the image needs no volume and no
 # config file: `docker run -e TELEGRAM_BOT_TOKEN=... -e OLLAMA_URL=... image`.
+# For an OpenAI-compatible backend, set SECTOR_AI_LLM_PROVIDER=openai and
+# SECTOR_AI_OPENAI_BASE_URL instead.
 ENTRYPOINT ["sector-ai"]

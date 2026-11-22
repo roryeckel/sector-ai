@@ -43,14 +43,14 @@ async def handle_vision(update: Update, context: SectorContext) -> None:
                 content=[
                     {"type": "text", "text": vision_prompt},
                     *(
-                        {"type": "image_url", "image_url": f"data:image/jpeg;base64,{photo_base64}"}
+                        {"type": "image", "base64": photo_base64, "mime_type": "image/jpeg"}
                         for photo_base64 in photo_base64s
                     ),
                 ]
             )
         ]
 
-        stream_generator = context.bot_ollama.astream(messages)
+        stream_generator = context.bot_llm.astream(messages)
         response = await handle_streaming_response(context, response_message, stream_generator, "Vision")
 
         if response:

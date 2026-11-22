@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock
 import pytest
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from telegram.error import NetworkError
 
 from sector_ai.chat import chat_cmd, handle_chat
 
@@ -79,7 +80,7 @@ async def test_prompt_sent_to_model_has_expected_shape(make_context, make_update
 
     await handle_chat(update, context)
 
-    sent = context.bot_ollama.received[0]
+    sent = context.bot_llm.received[0]
     assert [type(m) for m in sent] == [SystemMessage, HumanMessage]
     # System prompt first, then the replayed history in order.
     assert "Telegram chatbot" in sent[0].content
@@ -101,6 +102,51 @@ async def test_handle_chat_reports_setup_failure(make_context, make_update, monk
     assert "Error processing chat response: telegram down" in update.message.texts("edit_text")[-1]
 
 
+async def test_handle_chat_retries_after_a_network_error(make_context, make_update, quiet_settings, monkeypatch):
+    monkeypatch.setattr("sector_ai.chat.asyncio.sleep", AsyncMock())
+    context = make_context("hello again", settings=quiet_settings)
+    # The outage in the incident hit get_me() inside get_system_template_dict.
+    monkeypatch.setattr(
+        context,
+        "get_system_template_dict",
+        AsyncMock(side_effect=[NetworkError("502 Bad Gateway"), {"USERNAME": "testbot", "MAX_LEN": 4000}]),
+    )
+    update = make_update(text="/chat hello")
+
+    await handle_chat(update, context)
+
+    assert update.message.texts("edit_text")[-1] == "hello again"
+    assert context.chat_message_history[-1].content == "hello again"
+
+
+async def test_handle_chat_lets_a_persistent_network_error_propagate(
+    make_context, make_update, quiet_settings, monkeypatch
+):
+    monkeypatch.setattr("sector_ai.chat.asyncio.sleep", AsyncMock())
+    context = make_context("hello", settings=quiet_settings)
+    monkeypatch.setattr(context, "get_system_template_dict", AsyncMock(side_effect=NetworkError("still down")))
+    update = make_update(text="/chat hello")
+
+    with pytest.raises(NetworkError, match="still down"):
+        await handle_chat(update, context)
+
+    assert list(context.chat_message_history) == []
+
+
+async def test_handle_chat_retries_the_placeholder(make_context, make_update, quiet_settings, monkeypatch):
+    monkeypatch.setattr("sector_ai.chat.asyncio.sleep", AsyncMock())
+    context = make_context("hello", settings=quiet_settings)
+    update = make_update(text="/chat hi")
+    posted = AsyncMock()
+    posted.edit_text = AsyncMock()
+    update.message.reply_text = AsyncMock(side_effect=[NetworkError("blip"), posted])
+
+    await handle_chat(update, context)
+
+    assert update.message.reply_text.await_count == 2
+    assert posted.edit_text.await_args[0][0] == "hello"
+
+
 async def test_chat_cmd_without_argument_prompts_for_text(make_context, make_update):
     context = make_context("unused")
     update = make_update(text="/chat")
@@ -109,7 +155,7 @@ async def test_chat_cmd_without_argument_prompts_for_text(make_context, make_upd
 
     assert update.message.texts("reply_text") == ["Please enter your message to me."]
     assert list(context.chat_message_history) == []
-    assert context.bot_ollama.call_count == 0
+    assert context.bot_llm.call_count == 0
 
 
 async def test_chat_cmd_records_user_message(make_context, make_update, quiet_settings):
