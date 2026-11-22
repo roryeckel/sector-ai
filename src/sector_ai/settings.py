@@ -92,6 +92,8 @@ class Settings(BaseSettings):
     streaming_cursor: str = "🦙"
     streaming_interval_sec: float = Field(default=0.7, ge=0)
     streaming_chunk_size: int = Field(default=150, ge=0)
+    # Render model markdown as Telegram entities (bold, code, lists, quotes).
+    markdown: bool = True
 
     ollama_url: str = Field(
         default="http://localhost:11434",

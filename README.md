@@ -63,6 +63,14 @@ Compaction uses the model server itself, so it works the same on every backend. 
 
 If summarization fails, the oldest messages are dropped to fit the window instead and the bot keeps chatting; `SECTOR_AI_COMPACTION_MAX_MESSAGES` still bounds the history as a safety net. `/compact` (admin only) forces a compaction and reports the token change.
 
+### Message formatting
+
+Model replies are rendered with Telegram formatting: bold and italic, inline and fenced code with the language label, links, block quotes, spoilers, and list markers. Headings become bold or underlined text and tables become monospace blocks, because Telegram has no heading, list or table entities.
+
+Rendering uses Telegram message entities rather than `parse_mode`, so nothing is escaped and a half-written reply cannot break delivery. If Telegram rejects a formatted edit, the same text is sent without formatting and the rest of that reply stays plain; formatting is never allowed to cost a message. Set `SECTOR_AI_MARKDOWN=false` to send raw text.
+
+Replies longer than Telegram's 4096-character limit are split across messages at line breaks, with entities continuing across the split.
+
 ## Features
 
 This project uses the `python-telegram-bot` library, with various command handlers and message handlers to manage different interactions. Below is a summary of each command:
@@ -219,6 +227,7 @@ There is no configuration file. Settings come from environment variables, an opt
 | `SECTOR_AI_STREAMING_CURSOR` | `🦙` | Cursor shown while a reply streams. |
 | `SECTOR_AI_STREAMING_INTERVAL_SEC` | `0.7` | Minimum seconds between Telegram edits. |
 | `SECTOR_AI_STREAMING_CHUNK_SIZE` | `150` | Characters buffered before an edit. |
+| `SECTOR_AI_MARKDOWN` | `true` | Render model markdown as Telegram formatting. `false` sends raw text. |
 | `SECTOR_AI_LLM_TIMEOUT` | `200.0` | Request timeout in seconds. `SECTOR_AI_OLLAMA_TIMEOUT` is also accepted. |
 | `SECTOR_AI_LLM_DISALLOWED_MODELS` | *empty* | Comma separated models hidden from `/models`. `SECTOR_AI_OLLAMA_DISALLOWED_MODELS` is also accepted. |
 | `SECTOR_AI_LLM_HEADERS` | `{}` | JSON object of extra HTTP headers. `SECTOR_AI_OLLAMA_HEADERS` is also accepted. |

@@ -28,6 +28,7 @@ dependencies = [
     "langchain-ollama==1.1.0",
     "langchain-openai==1.8.5",
     "python-telegram-bot==22.8",
+    "telegramify-markdown==1.4.2",
     "svglib==2.4.0",
     "reportlab==5.1.0",
     "pypdfium2==5.15.2",
