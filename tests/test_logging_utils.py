@@ -12,6 +12,7 @@ from sector_ai.logging_utils import (
     configure_logging,
     redact_for_user,
     redact_token,
+    register_secrets,
 )
 from sector_ai.settings import Settings
 
@@ -126,6 +127,30 @@ def test_redact_for_user_removes_api_keys_and_bearer_headers():
     assert api_key not in text
     assert "header-secret-value" not in text
     assert text.count("<redacted>") == 2
+
+
+def test_short_and_cookie_credentials_are_redacted():
+    settings = Settings(
+        telegram_bot_token=TOKEN,
+        openai_api_key="abc",
+        llm_headers={"Cookie": "session=shh"},
+        _env_file=None,
+    )
+
+    text = redact_for_user("abc and session=shh", settings)
+
+    assert "abc" not in text
+    assert "session=shh" not in text
+
+
+def test_registered_secrets_cover_a_rotated_key():
+    rotated = "sk-rotated-abcdefghijkl"
+    register_secrets(Settings(telegram_bot_token=TOKEN, openai_api_key=rotated, _env_file=None))
+
+    output = TokenRedactingFormatter(LOG_FORMAT, token=TOKEN).format(make_record(rotated))
+
+    assert rotated not in output
+    assert "<redacted>" in output
 
 
 # --- configure_logging ---

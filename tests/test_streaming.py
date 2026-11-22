@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from langchain_core.messages import AIMessageChunk
-from telegram.error import NetworkError
+from telegram.error import BadRequest, NetworkError
 
 from sector_ai.streaming_handler import handle_streaming_response
 
@@ -91,12 +91,33 @@ async def test_edit_failure_stops_streaming_early(make_context, recording_messag
     assert len(message.calls_to("edit_text")) == 2
 
 
-async def test_network_error_from_an_edit_propagates(make_context, quiet_settings):
+async def test_network_error_from_an_edit_is_retried_then_returns_empty(make_context, quiet_settings, monkeypatch):
+    monkeypatch.setattr("sector_ai.retry.asyncio.sleep", AsyncMock())
     context = make_context(settings=quiet_settings)
     message = SimpleNamespace(edit_text=AsyncMock(side_effect=NetworkError("502")))
 
-    with pytest.raises(NetworkError, match="502"):
-        await handle_streaming_response(context, message, aiter_chunks(chunks("hello")), "Chat")
+    response = await handle_streaming_response(context, message, aiter_chunks(chunks("hello")), "Chat")
+
+    assert response == ""
+    assert message.edit_text.await_count == 3
+
+
+async def test_a_permanent_edit_failure_is_not_delivered(make_context, quiet_settings):
+    context = make_context(settings=quiet_settings)
+    message = SimpleNamespace(edit_text=AsyncMock(side_effect=BadRequest("Message to edit not found")))
+
+    response = await handle_streaming_response(context, message, aiter_chunks(chunks("hello")), "Chat")
+
+    assert response == ""
+
+
+async def test_not_modified_edit_counts_as_delivered(make_context, quiet_settings):
+    context = make_context(settings=quiet_settings)
+    message = SimpleNamespace(edit_text=AsyncMock(side_effect=BadRequest("Message is not modified")))
+
+    response = await handle_streaming_response(context, message, aiter_chunks(chunks("hello")), "Chat")
+
+    assert response == "hello"
 
 
 async def test_falsy_chunk_ends_stream(make_context, recording_message):

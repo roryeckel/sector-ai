@@ -28,8 +28,11 @@ LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 # catch a pasted URL while staying far away from ordinary prose.
 TOKEN_IN_URL = re.compile(r"bot\d+:[A-Za-z0-9_-]{30,}")
 
-# Short values are far more likely to be ordinary words than credentials.
-MIN_SECRET_LENGTH = 8
+# Credentials registered after startup, kept for the process lifetime so a
+# rotated key does not make the previous one loggable again.
+_REGISTERED_SECRETS: set[str] = set()
+
+CREDENTIAL_HEADER_WORDS = ("auth", "key", "token", "secret", "cookie")
 
 
 def settings_secrets(settings: Settings | None) -> set[str]:
@@ -42,18 +45,25 @@ def settings_secrets(settings: Settings | None) -> set[str]:
         settings.openai_api_key.get_secret_value(),
     }
     for name, value in settings.llm_headers.items():
-        if any(word in name.lower() for word in ("auth", "key", "token")):
+        if any(word in name.lower() for word in CREDENTIAL_HEADER_WORDS):
             if value.lower().startswith("bearer "):
                 value = value.split(None, 1)[1]
             secrets.add(value)
-    return {secret for secret in secrets if secret and len(secret) >= MIN_SECRET_LENGTH}
+    # An explicitly configured key is redacted even when it is short; only
+    # empty values are ignored.
+    return {secret for secret in secrets if secret}
+
+
+def register_secrets(settings: Settings | None) -> None:
+    """Teach the log formatter about credentials that appear after startup."""
+    _REGISTERED_SECRETS.update(settings_secrets(settings))
 
 
 def redact_secrets(text: str, secrets: Iterable[str]) -> str:
     """Replace token-shaped URLs and any configured secret in ``text``."""
     text = TOKEN_IN_URL.sub("bot<redacted>", text)
     for secret in secrets:
-        if secret and len(secret) >= MIN_SECRET_LENGTH:
+        if secret:
             text = text.replace(secret, "<redacted>")
     return text
 
@@ -65,7 +75,7 @@ def redact_token(text: str, token: str) -> str:
 
 def redact_for_user(text: str, settings: Settings | None) -> str:
     """Redact configured secrets before showing an error to a chat participant."""
-    return redact_secrets(text, settings_secrets(settings))
+    return redact_secrets(text, settings_secrets(settings) | _REGISTERED_SECRETS)
 
 
 class TokenRedactingFormatter(logging.Formatter):
@@ -73,15 +83,16 @@ class TokenRedactingFormatter(logging.Formatter):
 
     Formatting first matters: ``Formatter.format`` appends the traceback, which
     is where an exception carrying the request URL or an echoed header would
-    otherwise escape.
+    otherwise escape. Registered secrets are read on every call, so a key that
+    rotates while the bot runs is covered without a restart.
     """
 
     def __init__(self, *args, token: str = "", secrets: Iterable[str] = (), **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        self._secrets = [token, *secrets]
+        self._secrets = {token, *secrets}
 
     def format(self, record: logging.LogRecord) -> str:
-        return redact_secrets(super().format(record), self._secrets)
+        return redact_secrets(super().format(record), self._secrets | _REGISTERED_SECRETS)
 
 
 def configure_logging(settings: Settings) -> None:
@@ -96,6 +107,7 @@ def configure_logging(settings: Settings) -> None:
     root = logging.getLogger()
     root.setLevel(settings.log_level)
 
+    register_secrets(settings)
     formatter = TokenRedactingFormatter(
         LOG_FORMAT,
         token=settings.telegram_bot_token.get_secret_value(),

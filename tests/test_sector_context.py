@@ -865,6 +865,33 @@ async def test_ollama_num_ctx_wins_over_training_capacity(make_context):
         assert await context.get_context_length() == 2048
 
 
+async def test_provisional_ollama_capacity_is_refreshed(make_context, monkeypatch):
+    context = make_context("unused")
+
+    def cold(request):
+        if request.url.path.endswith("/api/ps"):
+            return httpx.Response(200, json={"models": []})
+        return httpx.Response(200, json={"model_info": {"qwen3.context_length": 131072}})
+
+    with _client_with(cold):
+        assert await context.get_context_length() == 131072
+
+    def loaded(request):
+        if request.url.path.endswith("/api/ps"):
+            return httpx.Response(200, json={"models": [{"model": "fake-model", "context_length": 4096}]})
+        return httpx.Response(500)
+
+    monkeypatch.setattr("sector_ai.sector_context.time", lambda: __import__("time").time() + 61)
+    with _client_with(loaded):
+        assert await context.get_context_length() == 4096
+
+
+def test_estimate_is_conservative_for_non_ascii(make_context):
+    context = make_context("unused")
+
+    assert context._estimate_token_count([HumanMessage(content="你" * 100)]) == 100
+
+
 async def test_a_transient_context_length_failure_is_not_cached(make_context, make_settings):
     settings = make_settings(llm_provider="openai")
     context = make_context("unused", settings=settings)

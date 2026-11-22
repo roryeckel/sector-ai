@@ -8,6 +8,7 @@ from telegram.error import BadRequest, NetworkError
 
 from .logging_utils import redact_for_user
 from .message_text import message_text
+from .retry import retry_on_network_error
 from .sector_context import SectorContext
 
 logger = logging.getLogger(__name__)
@@ -35,17 +36,20 @@ async def handle_streaming_response(
         try:
             new_text = response + message_postfix
             if new_text.strip() and new_text != last_sent:
-                await response_message.edit_text(new_text)
+                delivered = await retry_on_network_error(
+                    lambda: response_message.edit_text(new_text),
+                    what="Telegram edit",
+                    delays=(2.0, 5.0),
+                )
+                if delivered is None:
+                    return False
                 last_sent = new_text
         except BadRequest as e:
-            # BadRequest subclasses NetworkError, but "message is not modified"
-            # or a deleted message will not succeed on a retry.
-            logger.error(f"Error updating message: {e}")
-            return False
-        except NetworkError:
-            # Let the caller's retry loop see it; a dropped edit means the reply
-            # was not delivered even if generation succeeded.
-            raise
+            if "not modified" in str(e).lower():
+                last_sent = new_text
+            else:
+                logger.error(f"Error updating message: {e}")
+                return False
         except Exception as e:
             logger.error(f"Error updating message: {e}")
             return False
@@ -77,7 +81,7 @@ async def handle_streaming_response(
         if update_task:
             await update_task
 
-        await update_message()
+        delivered = await update_message()
 
         if not response.strip() and (saw_chunk or not ended_with_falsy):
             if finish_reason == "refusal":
@@ -86,11 +90,17 @@ async def handle_streaming_response(
                 await response_message.edit_text("The model returned an empty response.")
             logger.warning("%s returned no text", log_prefix)
 
+        if not delivered and response.strip():
+            logger.error("%s could not be delivered; not saving it", log_prefix)
+            return ""
+
         logger.info(f"{log_prefix} Result: {response}")
         return response
 
-    except NetworkError:
-        raise
+    except NetworkError as e:
+        # A delivery failure must not turn into another model call.
+        logger.error("%s delivery failed: %s", log_prefix, e)
+        return ""
     except Exception as e:
         error_message = f"Error processing {log_prefix.lower()}: {redact_for_user(str(e), context.settings)}"
         await response_message.edit_text(error_message)

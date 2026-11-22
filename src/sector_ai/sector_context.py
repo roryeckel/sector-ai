@@ -13,6 +13,7 @@ from telegram import Message
 from telegram.constants import MessageLimit
 from telegram.ext import Application, CallbackContext
 
+from .logging_utils import register_secrets
 from .message_text import message_refused, message_text
 from .settings import Settings
 
@@ -38,6 +39,32 @@ def _positive_int(value: object) -> Optional[int]:
     return None
 
 
+def _estimate_text_tokens(text: str) -> int:
+    """A conservative character-based bound. Non-ASCII scripts run near one
+    token per character, ASCII prose near four characters per token."""
+    if not text:
+        return 0
+    ascii_chars = sum(1 for character in text if ord(character) < 128)
+    return max(1, ascii_chars // 4 + (len(text) - ascii_chars))
+
+
+def _split_text(text: str, limit: int) -> list[str]:
+    """Split text into pieces that each estimate at or below ``limit`` tokens."""
+    pieces = []
+    start = 0
+    tokens = 0.0
+    for index, character in enumerate(text):
+        cost = 0.25 if ord(character) < 128 else 1.0
+        if tokens + cost > limit and index > start:
+            pieces.append(text[start:index])
+            start = index
+            tokens = 0.0
+        tokens += cost
+    if start < len(text):
+        pieces.append(text[start:])
+    return pieces or [""]
+
+
 class SectorContext(CallbackContext):
     def __init__(self, application: Application, chat_id: Optional[int] = None, user_id: Optional[int] = None):
         super().__init__(application=application, chat_id=chat_id, user_id=user_id)
@@ -52,6 +79,8 @@ class SectorContext(CallbackContext):
     @settings.setter
     def settings(self, new_settings: Settings) -> None:
         self.bot_data["settings"] = new_settings
+        # The log formatter keeps redacting a key rotated at runtime.
+        register_secrets(new_settings)
 
     @property
     def bot_llm(self) -> BaseChatModel:
@@ -294,29 +323,37 @@ class SectorContext(CallbackContext):
     async def get_context_length(self) -> Optional[int]:
         """The server's context window for the active model, when it advertises one.
 
-        Settings win, then a cached value, then a one-time lookup. A successful
-        response that carries no window is cached as unknown; a timeout or an
-        auth failure is not cached, so fixing the server or its credentials
-        triggers a fresh lookup.
+        Settings win, then a cached value, then a lookup. A successful response
+        that carries no window is cached as unknown; a timeout or an auth
+        failure is not cached, so fixing the server or its credentials triggers
+        a fresh lookup. Values derived from Ollama metadata (rather than the
+        running model or an explicit num_ctx) are provisional and expire, since
+        a cold model reports training capacity instead of the served window.
         """
         if self.settings.context_length > 0:
             return self.settings.context_length
 
         key = self._context_length_key()
         cache = self.bot_data.setdefault("context_lengths", {})
-        if key in cache:
-            return cache[key]
+        cached = cache.get(key)
+        if isinstance(cached, tuple):
+            length, expires = cached
+            if time() < expires:
+                return length
+            cache.pop(key, None)
+        elif key in cache:
+            return cached
 
         try:
             if self.settings.llm_provider == "openai":
-                length = await self._openai_context_length()
+                length, provisional = await self._openai_context_length()
             else:
-                length = await self._ollama_context_length()
+                length, provisional = await self._ollama_context_length()
         except Exception as error:
             logger.debug("Could not detect the context length (%s); will retry", error)
             return None
 
-        cache[key] = length
+        cache[key] = (length, time() + 60) if provisional else length
         return length
 
     def _context_length_key(self) -> tuple:
@@ -332,7 +369,7 @@ class SectorContext(CallbackContext):
         """The token budget compaction works against."""
         return await self.get_context_length() or DEFAULT_CONTEXT_LENGTH
 
-    async def _openai_context_length(self) -> Optional[int]:
+    async def _openai_context_length(self) -> tuple[Optional[int], bool]:
         async with httpx.AsyncClient(
             headers=self._openai_headers(),
             timeout=min(self.settings.llm_timeout, 10.0),
@@ -341,7 +378,7 @@ class SectorContext(CallbackContext):
         if not response.is_success:
             if response.status_code in {404, 405, 501}:
                 # The route does not exist here; that will not change.
-                return None
+                return None, False
             raise RuntimeError(f"the model list returned HTTP {response.status_code}")
 
         for entry in response.json().get("data") or []:
@@ -358,26 +395,28 @@ class SectorContext(CallbackContext):
             ):
                 length = _positive_int(entry.get(field))
                 if length:
-                    return length
+                    return length, False
             meta = entry.get("meta")
             if isinstance(meta, dict):
                 for field in ("n_ctx", "n_ctx_train"):
                     length = _positive_int(meta.get(field))
                     if length:
-                        return length
+                        return length, False
             top_provider = entry.get("top_provider")
             if isinstance(top_provider, dict):
                 length = _positive_int(top_provider.get("context_length"))
                 if length:
-                    return length
-            return None
-        return None
+                    return length, False
+            return None, False
+        return None, False
 
-    async def _ollama_context_length(self) -> Optional[int]:
+    async def _ollama_context_length(self) -> tuple[Optional[int], bool]:
         base = self.settings.ollama_url.rstrip("/")
         timeout = min(self.settings.llm_timeout, 10.0)
         async with httpx.AsyncClient(headers=self.settings.llm_headers, timeout=timeout) as client:
             running = await client.get(f"{base}/api/ps")
+            if not running.is_success and running.status_code not in {404, 405, 501}:
+                raise RuntimeError(f"the running model list returned HTTP {running.status_code}")
             if running.is_success:
                 # The loaded model reports the window it was actually started with.
                 for model in running.json().get("models") or []:
@@ -386,11 +425,11 @@ class SectorContext(CallbackContext):
                     if (model.get("model") or model.get("name")) == self.get_model():
                         length = _positive_int(model.get("context_length"))
                         if length:
-                            return length
+                            return length, False
             shown = await client.post(f"{base}/api/show", json={"name": self.get_model()})
         if not shown.is_success:
             if shown.status_code in {404, 405, 501}:
-                return None
+                return None, False
             raise RuntimeError(f"the model details returned HTTP {shown.status_code}")
 
         data = shown.json()
@@ -402,7 +441,7 @@ class SectorContext(CallbackContext):
             if len(parts) == 2 and parts[0] == "num_ctx":
                 length = _positive_int(parts[1])
                 if length:
-                    return length
+                    return length, False
         info = data.get("model_info") or {}
         lengths = [
             length
@@ -412,8 +451,9 @@ class SectorContext(CallbackContext):
             if length
         ]
         if lengths:
-            return max(lengths)
-        return None
+            # Provisional: a cold model reports what it was trained for.
+            return max(lengths), True
+        return None, False
 
     # Token counting
 
@@ -451,11 +491,9 @@ class SectorContext(CallbackContext):
         return tokens
 
     def _estimate_token_count(self, messages: list[BaseMessage]) -> int:
-        """A dependency-free fallback; roughly four characters per token."""
+        """A dependency-free fallback; conservative for non-ASCII text."""
         text = "\n".join(message_text(message) for message in messages)
-        if not text:
-            return 0
-        return max(1, len(text) // 4)
+        return _estimate_text_tokens(text)
 
     @property
     def token_count_is_exact(self) -> bool:
@@ -586,7 +624,7 @@ class SectorContext(CallbackContext):
                 logger.warning("Context compaction failed; dropping the oldest messages", exc_info=True)
             # Keeping the newest messages verbatim can still leave an oversized
             # prompt, and a failed summary leaves the old transcript in place.
-            self._trim_to_budget(budget)
+            await self._trim_to_budget(budget)
             return compacted
         except Exception:
             logger.warning("Context compaction check failed; keeping the transcript", exc_info=True)
@@ -609,14 +647,12 @@ class SectorContext(CallbackContext):
 
         evicted = history[:-keep]
         max_chars = self.settings.compaction_summary_max_chars
-        # Most evictions fit one request. Only a transcript large enough to
-        # approach a server window needs the extra lookup and chunking.
-        tokens = sum(max(1, len(message_text(message)) // 4) for message in evicted)
-        limit = max(256, tokens)
-        if tokens > 2048:
-            limit = max(256, (await self.get_context_budget()) // 2)
+        # Room for the compaction prompt, the merged summary and the reply.
+        budget = await self.get_context_budget()
+        reserve = min(512, budget // 4) + min(max_chars // 4, budget // 4) + len(self.context_summary) // 4
+        capacity = max(128, budget - reserve)
         summary = self.context_summary
-        for chunk in self._summary_chunks(evicted, limit):
+        for chunk in self._summary_chunks(evicted, capacity):
             summary = await self._summarize_chunk(summary, chunk, max_chars)
 
         self.chat_data["message_history"] = history[-keep:]
@@ -653,12 +689,24 @@ class SectorContext(CallbackContext):
 
     @staticmethod
     def _summary_chunks(messages: list, limit: int) -> list[list]:
-        """Split a transcript so no summarization request is oversized."""
+        """Split a transcript so no summarization request is oversized.
+
+        A single message larger than ``limit`` is split into text pieces, which
+        lose only the role marker and keep every word.
+        """
         chunks = []
         chunk = []
         tokens = 0
         for message in messages:
-            size = max(1, len(message_text(message)) // 4)
+            text = message_text(message)
+            size = _estimate_text_tokens(text)
+            if size > limit:
+                if chunk:
+                    chunks.append(chunk)
+                    chunk = []
+                    tokens = 0
+                chunks.extend([[HumanMessage(content=piece)] for piece in _split_text(text, limit)])
+                continue
             if chunk and tokens + size > limit:
                 chunks.append(chunk)
                 chunk = []
@@ -669,23 +717,34 @@ class SectorContext(CallbackContext):
             chunks.append(chunk)
         return chunks
 
-    def _trim_to_budget(self, budget: int) -> None:
-        """Drop the oldest messages until the estimated context fits the window.
+    async def _trim_to_budget(self, budget: int) -> None:
+        """Drop context until the complete rendered prompt fits the window.
 
+        The summary is shrunk first because it is the cheapest thing to lose.
         This is the last resort after a compaction that could not free enough,
-        or a summarizer that failed. It trades old context for a request the
+        or a summarizer that failed: it trades old context for a request the
         server can still accept.
         """
         limit = budget * self.settings.compaction_threshold * 0.9
         history = self.chat_message_history
+
+        async def overhead() -> int:
+            full = self._estimate_token_count(await self._current_context_messages())
+            return max(0, full - self._estimate_token_count(history))
+
+        while self.context_summary and await overhead() > limit:
+            summary = self.context_summary
+            self.context_summary = summary[: len(summary) // 2]
+
+        base = await overhead()
         keep_from = 0
-        while len(history) - keep_from > 1 and self._estimate_token_count(history[keep_from:]) > limit:
+        while len(history) - keep_from > 1 and base + self._estimate_token_count(history[keep_from:]) > limit:
             keep_from += 1
         if keep_from:
             self.chat_data["message_history"] = history[keep_from:]
             self.chat_data.pop("token_count", None)
             logger.warning("Dropped %s messages to fit the context window", keep_from)
-        elif len(history) == 1 and self._estimate_token_count(history) > limit:
+        elif len(history) == 1 and base + self._estimate_token_count(history) > limit:
             logger.warning("The newest message alone exceeds the context window")
 
     def _enforce_history_cap(self) -> None:
