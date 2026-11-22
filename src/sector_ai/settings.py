@@ -6,6 +6,11 @@ optional ``.env`` file next to the process, or the CLI flags in
 and ``__`` separates nested names, so ``SECTOR_AI_SYSTEM_PROMPTS__SVG``
 overrides the SVG prompt. ``TELEGRAM_BOT_TOKEN`` and ``OLLAMA_URL`` are
 accepted bare as well, because that is what container users expect to set.
+
+Two backends are supported: Ollama's native API (the default) and any
+OpenAI-compatible ``/v1`` endpoint. Set ``SECTOR_AI_LLM_PROVIDER=openai`` and
+point ``SECTOR_AI_OPENAI_BASE_URL`` at a server such as Ollama, LM Studio,
+vLLM or OpenRouter.
 """
 
 import json
@@ -18,6 +23,7 @@ from .prompts import (
     BASIC_POLL_SYSTEM_PROMPT,
     CHARACTERIZER_SYSTEM_PROMPT,
     CODE_SYSTEM_PROMPT,
+    COMPACTION_SYSTEM_PROMPT,
     DECIDE_AUTOREPLY_SYSTEM_PROMPT,
     DECIDE_SYSTEM_PROMPT,
     DEFAULT_SYSTEM_PROMPT,
@@ -30,6 +36,7 @@ from .prompts import (
 )
 
 LOG_LEVELS = ("CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG")
+LLM_PROVIDERS = ("ollama", "openai")
 
 
 def _split_list(value: object) -> object:
@@ -47,6 +54,7 @@ def _split_list(value: object) -> object:
 class SystemPrompts(BaseModel):
     default: str = DEFAULT_SYSTEM_PROMPT
     summarization: str = SUMMARIZATION_SYSTEM_PROMPT
+    compaction: str = COMPACTION_SYSTEM_PROMPT
     emoji: str = EMOJI_SYSTEM_PROMPT
     basic_poll: str = BASIC_POLL_SYSTEM_PROMPT
     topic_poll: str = TOPIC_POLL_SYSTEM_PROMPT
@@ -67,7 +75,7 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
         # CLI overrides are passed by field name, which pydantic otherwise
-        # rejects for the two fields that carry a validation alias.
+        # rejects for fields that carry a validation alias.
         validate_by_name=True,
     )
 
@@ -89,27 +97,51 @@ class Settings(BaseSettings):
         default="http://localhost:11434",
         validation_alias=AliasChoices("OLLAMA_URL", "SECTOR_AI_OLLAMA_URL"),
     )
-    ollama_timeout: float = Field(default=200.0, gt=0)
-    ollama_context_length: int | None = Field(default=2048, gt=0)
-    ollama_headers: dict[str, str] = {}
-    ollama_disallowed_models: Annotated[list[str], NoDecode] = []
+    llm_provider: str = "ollama"
+    openai_base_url: str = "http://localhost:11434/v1"
+    openai_api_key: SecretStr = SecretStr("")
+
+    llm_timeout: float = Field(
+        default=200.0,
+        gt=0,
+        validation_alias=AliasChoices("SECTOR_AI_LLM_TIMEOUT", "SECTOR_AI_OLLAMA_TIMEOUT"),
+    )
+    llm_headers: dict[str, str] = Field(
+        default={},
+        validation_alias=AliasChoices("SECTOR_AI_LLM_HEADERS", "SECTOR_AI_OLLAMA_HEADERS"),
+    )
+    llm_disallowed_models: Annotated[list[str], NoDecode] = Field(
+        default=[],
+        validation_alias=AliasChoices("SECTOR_AI_LLM_DISALLOWED_MODELS", "SECTOR_AI_OLLAMA_DISALLOWED_MODELS"),
+    )
+
+    # Context compaction. A zero context_length means auto-detect from the
+    # server, falling back to a conservative default when it advertises none.
+    context_length: int = Field(default=0, ge=0)
+    compaction_enabled: bool = True
+    compaction_threshold: float = Field(default=0.75, gt=0, le=1)
+    compaction_keep_messages: int = Field(default=8, ge=1)
+    compaction_max_messages: int = Field(default=500, ge=1)
+    compaction_summary_max_chars: int = Field(default=4000, ge=200)
 
     system_prompts: SystemPrompts = Field(default_factory=SystemPrompts)
 
     log_level: str = "INFO"
 
-    @field_validator("admin_usernames", "ollama_disallowed_models", mode="before")
+    @field_validator("admin_usernames", "llm_disallowed_models", mode="before")
     @classmethod
     def _list_fields(cls, value: object) -> object:
         return _split_list(value)
 
-    @field_validator("ollama_context_length", mode="before")
+    @field_validator("llm_provider")
     @classmethod
-    def _nullable_context_length(cls, value: object) -> object:
-        """Environment values arrive as strings, so accept the documented spellings of "no cap"."""
-        if isinstance(value, str) and value.strip().lower() in {"", "null", "none"}:
-            return None
-        return value
+    def _llm_provider(cls, value: str) -> str:
+        provider = value.strip().lower()
+        if not provider:
+            return "ollama"
+        if provider not in LLM_PROVIDERS:
+            raise ValueError(f"must be one of {', '.join(LLM_PROVIDERS)}")
+        return provider
 
     @field_validator("log_level")
     @classmethod

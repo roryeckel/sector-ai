@@ -1,4 +1,4 @@
-"""Sector AI: a Telegram bot backed by LangChain and Ollama."""
+"""Sector AI: a Telegram bot backed by LangChain, running on Ollama or any OpenAI-compatible endpoint."""
 
 from importlib.metadata import PackageNotFoundError, version
 

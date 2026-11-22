@@ -20,6 +20,15 @@ SUMMARIZATION_SYSTEM_PROMPT = (
     "limited to {MAX_LEN} characters."
 )
 
+COMPACTION_SYSTEM_PROMPT = (
+    "You maintain the running memory of a Telegram conversation. You are given the previous summary and the next "
+    "part of the transcript. Merge them into one summary that keeps everything needed to continue the conversation: "
+    "who said what, names and roles, facts and preferences, decisions, unresolved questions, and anything the "
+    "assistant promised. Drop greetings, small talk, filler and repeated messages. Write terse notes, one fact per "
+    "line, with no preamble, no headings and no closing remarks. Do not invent details. Your reply is limited to "
+    "{MAX_CHARS} characters."
+)
+
 EMOJI_SYSTEM_PROMPT = (
     "You are to respond only with emojis. This emojis must be symbolic and represent the input. Do not use any "
     "normal characters. You can use plenty of emojis, but they must be relevant to the input. The following input "

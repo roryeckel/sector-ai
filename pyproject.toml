@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "sector-ai"
 version = "1.4.1"
-description = "Python Telegram Bot powered by LangChain and Ollama"
+description = "Python Telegram Bot powered by LangChain, Ollama or any OpenAI-compatible endpoint"
 authors = [
     { name = "Rory Eckel" }
 ]
@@ -13,7 +13,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = "GPL-3.0-only"
 license-files = ["LICENSE"]
-keywords = ["telegram", "bot", "ollama", "langchain", "llm"]
+keywords = ["telegram", "bot", "ollama", "openai", "langchain", "llm"]
 classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
@@ -26,12 +26,14 @@ classifiers = [
 dependencies = [
     "langchain-core==1.8.4",
     "langchain-ollama==1.1.0",
+    "langchain-openai==1.8.5",
     "python-telegram-bot==22.8",
     "svglib==2.4.0",
     "reportlab==5.1.0",
     "pypdfium2==5.15.2",
     "pydantic==2.14.4",
     "pydantic-settings==2.16.3",
+    "python-dotenv==1.2.4",
     "httpx==0.28.1"
 ]
 

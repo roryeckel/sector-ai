@@ -1,8 +1,10 @@
 import argparse
 import logging
+import os
 import warnings
 from datetime import UTC, datetime, timedelta
 
+from dotenv import dotenv_values
 from langchain_core.messages import AIMessage
 from pydantic import ValidationError
 from pydantic_settings import SettingsError
@@ -11,17 +13,17 @@ from telegram.error import BadRequest
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
 from . import __version__
-from .admin import clear_cmd, model_callback, models_cmd, system_prompt_cmd, temperature_cmd
+from .admin import clear_cmd, compact_cmd, model_callback, models_cmd, system_prompt_cmd, temperature_cmd
 from .autoreply import autoreply_cmd, should_respond
 from .characterize import characterize_cmd
 from .chat import chat_cmd, handle_chat
 from .coding import code_cmd, html_cmd, svg_cmd
 from .decision import decide_cmd
 from .emoji import emoji_cmd
-from .logging_utils import configure_logging
+from .logging_utils import configure_logging, redact_for_user
 from .poll import poll_cmd
 from .sector_context import SectorContext
-from .settings import LOG_LEVELS, Settings
+from .settings import LLM_PROVIDERS, LOG_LEVELS, Settings
 from .summarize import summarize_cmd
 from .tokens import tokens_cmd
 from .topic import topic_poll_cmd
@@ -56,12 +58,14 @@ async def handle_message(update: Update, context: SectorContext) -> None:
 async def error_handler(update: Update, context: SectorContext) -> None:
     logger.exception("An error occurred", exc_info=context.error)
     error_str = str(context.error)
-    new_chat_message = AIMessage(content=error_str)
-    context.chat_message_history.append(new_chat_message)
+    settings = context.bot_data.get("settings")
+    if settings is not None:
+        # Backend errors can echo an Authorization header back to the chat.
+        error_str = redact_for_user(error_str, settings)
     try:
-        if update.message:
+        if update and update.message:
             await update.message.reply_text(error_str)
-        else:
+        elif update and update.callback_query:
             await update.callback_query.answer(error_str)
     except BadRequest:
         pass
@@ -75,11 +79,21 @@ def build_parser() -> argparse.ArgumentParser:
     """
     parser = argparse.ArgumentParser(prog="sector-ai", description="Sector AI Telegram Bot")
     parser.add_argument("--version", action="version", version=f"sector-ai {__version__}")
-    parser.add_argument("--model", dest="default_model", help="Default Ollama model (SECTOR_AI_DEFAULT_MODEL)")
+    parser.add_argument("--model", dest="default_model", help="Default model (SECTOR_AI_DEFAULT_MODEL)")
+    parser.add_argument("--vision-model", dest="vision_model", help="Model used for images (SECTOR_AI_VISION_MODEL)")
     parser.add_argument(
-        "--vision-model", dest="vision_model", help="Ollama model used for images (SECTOR_AI_VISION_MODEL)"
+        "--provider",
+        dest="llm_provider",
+        type=str.lower,
+        choices=LLM_PROVIDERS,
+        help="Backend: Ollama's native API or an OpenAI-compatible endpoint (SECTOR_AI_LLM_PROVIDER)",
     )
     parser.add_argument("--ollama-url", dest="ollama_url", help="Ollama base URL (OLLAMA_URL)")
+    parser.add_argument(
+        "--openai-url",
+        dest="openai_base_url",
+        help="OpenAI-compatible base URL including /v1 (SECTOR_AI_OPENAI_BASE_URL)",
+    )
     parser.add_argument(
         "--admin",
         dest="admin_usernames",
@@ -115,6 +129,12 @@ def main(argv: list[str] | None = None) -> None:
     warnings.filterwarnings("ignore", category=FutureWarning)
     configure_logging(settings)
 
+    if "SECTOR_AI_OLLAMA_CONTEXT_LENGTH" in os.environ or "SECTOR_AI_OLLAMA_CONTEXT_LENGTH" in dotenv_values(".env"):
+        logger.warning(
+            "SECTOR_AI_OLLAMA_CONTEXT_LENGTH is ignored; configure context length on the model server "
+            "(OLLAMA_CONTEXT_LENGTH or a Modelfile)."
+        )
+
     # Create the application with custom context type
     context_types = ContextTypes(context=SectorContext)
     application = (
@@ -140,6 +160,7 @@ def main(argv: list[str] | None = None) -> None:
     application.add_handler(CommandHandler("models", models_cmd))
     application.add_handler(CallbackQueryHandler(model_callback))
     application.add_handler(CommandHandler("tokens", tokens_cmd))
+    application.add_handler(CommandHandler("compact", compact_cmd))
     application.add_handler(CommandHandler("autoreply", autoreply_cmd))
 
     # Add message handler
@@ -151,7 +172,9 @@ def main(argv: list[str] | None = None) -> None:
     application.add_error_handler(error_handler)
 
     # Start the bot
-    application.run_polling()
+    # Retry bootstrapping forever: a network blip during get_me() must not
+    # kill the process before polling even starts.
+    application.run_polling(bootstrap_retries=-1)
 
 
 if __name__ == "__main__":

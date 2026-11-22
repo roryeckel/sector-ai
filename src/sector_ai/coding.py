@@ -9,6 +9,7 @@ from svglib.svglib import svg2rlg
 from telegram import Update
 from telegram.error import BadRequest
 
+from .message_text import message_refused, message_text
 from .sector_context import SectorContext
 
 logger = logging.getLogger(__name__)
@@ -47,7 +48,7 @@ async def code_cmd(update: Update, context: SectorContext) -> None:
     template = PromptTemplate(
         template=context.settings.system_prompts.code, input_variables=["input", *system_template_dict.keys()]
     )
-    chain = template | context.bot_ollama
+    chain = template | context.bot_llm
     code_prompt = update.message.text.split(maxsplit=1)
     if len(code_prompt) <= 1:
         await update.message.reply_text("No prompt provided.")
@@ -55,7 +56,11 @@ async def code_cmd(update: Update, context: SectorContext) -> None:
     code_prompt = code_prompt[-1]
     logger.info(f"Code Prompt: {code_prompt}")
     for i in range(3):
-        code = (await chain.ainvoke({"input": code_prompt, **system_template_dict})).content
+        message = await chain.ainvoke({"input": code_prompt, **system_template_dict})
+        if message_refused(message):
+            await update.message.reply_text(message_text(message) or "The model refused the request.")
+            return
+        code = message_text(message)
         logger.info(f"Code: {code}")
         try:
             await update.message.reply_markdown_v2(code)
@@ -72,7 +77,7 @@ async def html_cmd(update: Update, context: SectorContext) -> None:
     template = PromptTemplate(
         template=context.settings.system_prompts.html, input_variables=["input", *system_template_dict.keys()]
     )
-    chain = template | context.bot_ollama
+    chain = template | context.bot_llm
     html_prompt = update.message.text.split(maxsplit=1)
     if len(html_prompt) <= 1:
         await update.message.reply_text("No prompt provided.")
@@ -80,8 +85,15 @@ async def html_cmd(update: Update, context: SectorContext) -> None:
     html_prompt = html_prompt[-1]
     logger.info(f"HTML Prompt: {html_prompt}")
     for i in range(3):
-        html = (await chain.ainvoke({"input": html_prompt, **system_template_dict})).content
+        message = await chain.ainvoke({"input": html_prompt, **system_template_dict})
+        if message_refused(message):
+            await update.message.reply_text(message_text(message) or "The model refused the request.")
+            return
+        html = message_text(message)
         logger.info(f"HTML: {html}")
+        if not html.strip():
+            await update.message.reply_text("The model returned an empty response.")
+            return
         try:
             await update.message.reply_document(
                 filename="Website.html", caption=html_prompt, document=BytesIO(html.encode("utf-8"))
@@ -99,7 +111,7 @@ async def svg_cmd(update: Update, context: SectorContext) -> None:
     template = PromptTemplate(
         template=context.settings.system_prompts.svg, input_variables=["input", *system_template_dict.keys()]
     )
-    chain = template | context.bot_ollama
+    chain = template | context.bot_llm
     svg_prompt = update.message.text.split(maxsplit=1)
     if len(svg_prompt) <= 1:
         await update.message.reply_text("No prompt provided.")
@@ -107,7 +119,11 @@ async def svg_cmd(update: Update, context: SectorContext) -> None:
     svg_prompt = svg_prompt[-1]
     logger.info(f"SVG Prompt: {svg_prompt}")
     for i in range(3):
-        svg = (await chain.ainvoke({"input": svg_prompt, **system_template_dict})).content.strip("```")
+        message = await chain.ainvoke({"input": svg_prompt, **system_template_dict})
+        if message_refused(message):
+            await update.message.reply_text(message_text(message) or "The model refused the request.")
+            return
+        svg = message_text(message).strip("```")
         logger.info(f"SVG: {svg}")
         try:
             png_file = await asyncio.to_thread(render_svg_png, svg, context.chat_svg_size)

@@ -34,6 +34,14 @@ def test_key_dependencies_import():
     except ImportError as e:
         pytest.fail(f"Failed to import langchain_ollama: {e}")
 
+    # Test langchain-openai import
+    try:
+        import langchain_openai
+
+        assert langchain_openai is not None
+    except ImportError as e:
+        pytest.fail(f"Failed to import langchain_openai: {e}")
+
     # Test python-telegram-bot import
     try:
         import telegram

@@ -25,13 +25,13 @@ async def test_topic_sends_poll(make_context, make_update):
     assert update.message.calls_to("reply_poll")[0][1]["is_anonymous"] is False
 
 
-async def test_topic_resets_json_format_flag(make_context, make_update):
+async def test_topic_requests_json_mode(make_context, make_update):
     context = make_context(topic_json("alpha", "beta"))
     update = make_update(text="/topic")
 
     await topic_poll_cmd(update, context)
 
-    assert context.bot_ollama.format == ""
+    assert context.bot_llm.received_kwargs[-1]["response_format"] == {"type": "json_object"}
 
 
 async def test_topic_rejects_too_few_topics(make_context, make_update):

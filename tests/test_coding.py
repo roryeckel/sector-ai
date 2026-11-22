@@ -21,13 +21,29 @@ async def test_code_cmd_sends_markdown(make_context, make_update):
     assert update.message.calls_to("reply_markdown_v2")[0][0] == ("print(1)",)
 
 
+async def test_code_cmd_reports_a_refusal(make_context, make_update):
+    from langchain_core.language_models import GenericFakeChatModel
+    from langchain_core.messages import AIMessage
+
+    model = GenericFakeChatModel(
+        messages=iter([AIMessage(content=[{"type": "refusal", "refusal": "I cannot write that."}])])
+    )
+    context = make_context(model=model)
+    update = make_update(text="/code print one")
+
+    await code_cmd(update, context)
+
+    assert update.message.texts("reply_text")[0] == "I cannot write that."
+    assert update.message.calls_to("reply_markdown_v2") == []
+
+
 async def test_code_cmd_prompt_includes_user_input_and_template_vars(make_context, make_update):
     context = make_context("print(1)")
     update = make_update(text="/code print one")
 
     await code_cmd(update, context)
 
-    sent = context.bot_ollama.received[0][0].content
+    sent = context.bot_llm.received[0][0].content
     assert "print one" in sent
     assert "4096" in sent  # MAX_LEN was substituted
 
@@ -39,7 +55,7 @@ async def test_code_cmd_retries_before_succeeding(make_context, make_update):
     await code_cmd(update, context)
 
     assert len(update.message.calls_to("reply_markdown_v2")) == 3
-    assert context.bot_ollama.call_count == 3
+    assert context.bot_llm.call_count == 3
     assert "Failed" not in update.message.texts("reply_text")
 
 
@@ -49,7 +65,7 @@ async def test_code_cmd_gives_up_after_three_attempts(make_context, make_update)
 
     await code_cmd(update, context)
 
-    assert context.bot_ollama.call_count == 3
+    assert context.bot_llm.call_count == 3
     assert update.message.texts("reply_text")[-1] == "Failed to generate valid code snippet."
 
 
@@ -115,7 +131,7 @@ async def test_svg_cmd_retries_invalid_output(make_context, make_update):
 
     await svg_cmd(update, context)
 
-    assert context.bot_ollama.call_count == 3
+    assert context.bot_llm.call_count == 3
     assert len(update.message.calls_to("reply_photo")) == 1
 
 

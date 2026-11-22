@@ -29,10 +29,12 @@ def test_defaults_match_the_shipped_configuration(make_settings):
     assert settings.streaming_interval_sec == 0.7
     assert settings.streaming_chunk_size == 150
     assert settings.ollama_url == "http://localhost:11434"
-    assert settings.ollama_timeout == 200.0
-    assert settings.ollama_context_length == 2048
-    assert settings.ollama_headers == {}
-    assert settings.ollama_disallowed_models == []
+    assert settings.llm_provider == "ollama"
+    assert settings.openai_base_url == "http://localhost:11434/v1"
+    assert settings.openai_api_key.get_secret_value() == ""
+    assert settings.llm_timeout == 200.0
+    assert settings.llm_headers == {}
+    assert settings.llm_disallowed_models == []
     assert settings.log_level == "INFO"
     assert settings.system_prompts.default == DEFAULT_SYSTEM_PROMPT
     assert settings.system_prompts.svg == SVG_SYSTEM_PROMPT
@@ -78,13 +80,13 @@ def test_empty_token_is_rejected(monkeypatch):
 def test_prefixed_variables_override_defaults(monkeypatch):
     monkeypatch.setenv("SECTOR_AI_DEFAULT_MODEL", "env-model")
     monkeypatch.setenv("SECTOR_AI_STREAMING_INTERVAL_SEC", "2.5")
-    monkeypatch.setenv("SECTOR_AI_OLLAMA_CONTEXT_LENGTH", "4096")
+    monkeypatch.setenv("SECTOR_AI_LLM_TIMEOUT", "12.5")
 
     settings = env_only()
 
     assert settings.default_model == "env-model"
     assert settings.streaming_interval_sec == 2.5
-    assert settings.ollama_context_length == 4096
+    assert settings.llm_timeout == 12.5
 
 
 def test_bare_ollama_url_is_accepted(monkeypatch):
@@ -132,9 +134,54 @@ def test_admin_usernames_rejects_broken_json(monkeypatch):
 
 
 def test_disallowed_models_accepts_comma_separated(monkeypatch):
-    monkeypatch.setenv("SECTOR_AI_OLLAMA_DISALLOWED_MODELS", "big:latest,huge:latest")
+    monkeypatch.setenv("SECTOR_AI_LLM_DISALLOWED_MODELS", "big:latest,huge:latest")
 
-    assert env_only().ollama_disallowed_models == ["big:latest", "huge:latest"]
+    assert env_only().llm_disallowed_models == ["big:latest", "huge:latest"]
+
+
+def test_old_ollama_names_still_work(monkeypatch):
+    monkeypatch.setenv("SECTOR_AI_OLLAMA_TIMEOUT", "12")
+    monkeypatch.setenv("SECTOR_AI_OLLAMA_HEADERS", '{"X-Test": "yes"}')
+    monkeypatch.setenv("SECTOR_AI_OLLAMA_DISALLOWED_MODELS", "big:latest")
+
+    settings = env_only()
+
+    assert settings.llm_timeout == 12.0
+    assert settings.llm_headers == {"X-Test": "yes"}
+    assert settings.llm_disallowed_models == ["big:latest"]
+
+
+def test_provider_defaults_to_ollama(make_settings):
+    assert make_settings().llm_provider == "ollama"
+
+
+def test_provider_accepts_openai(monkeypatch):
+    monkeypatch.setenv("SECTOR_AI_LLM_PROVIDER", "OpenAI")
+
+    assert env_only().llm_provider == "openai"
+
+
+def test_blank_provider_defaults_to_ollama(monkeypatch):
+    monkeypatch.setenv("SECTOR_AI_LLM_PROVIDER", "  ")
+
+    assert env_only().llm_provider == "ollama"
+
+
+def test_invalid_provider_is_rejected(monkeypatch):
+    monkeypatch.setenv("SECTOR_AI_LLM_PROVIDER", "anthropic")
+
+    with pytest.raises(ValidationError, match="must be one of"):
+        env_only()
+
+
+def test_openai_endpoint_and_key(monkeypatch):
+    monkeypatch.setenv("SECTOR_AI_OPENAI_BASE_URL", "http://lmstudio:1234/v1")
+    monkeypatch.setenv("SECTOR_AI_OPENAI_API_KEY", "sk-test")
+
+    settings = env_only()
+
+    assert settings.openai_base_url == "http://lmstudio:1234/v1"
+    assert settings.openai_api_key.get_secret_value() == "sk-test"
 
 
 def test_nested_system_prompt_override(monkeypatch):
@@ -146,10 +193,10 @@ def test_nested_system_prompt_override(monkeypatch):
     assert settings.system_prompts.default == DEFAULT_SYSTEM_PROMPT
 
 
-def test_ollama_headers_are_json(monkeypatch):
-    monkeypatch.setenv("SECTOR_AI_OLLAMA_HEADERS", '{"Authorization": "Bearer x"}')
+def test_headers_are_json(monkeypatch):
+    monkeypatch.setenv("SECTOR_AI_LLM_HEADERS", '{"Authorization": "Bearer x"}')
 
-    assert env_only().ollama_headers == {"Authorization": "Bearer x"}
+    assert env_only().llm_headers == {"Authorization": "Bearer x"}
 
 
 def test_log_level_is_upper_cased(monkeypatch):
@@ -170,8 +217,7 @@ def test_invalid_log_level_is_rejected(monkeypatch):
     [
         {"streaming_interval_sec": -1},
         {"streaming_chunk_size": -1},
-        {"ollama_timeout": 0},
-        {"ollama_context_length": 0},
+        {"llm_timeout": 0},
         {"default_svg_size": 1},
         {"default_svg_size": 4096},
     ],
@@ -179,31 +225,6 @@ def test_invalid_log_level_is_rejected(monkeypatch):
 def test_out_of_range_values_are_rejected(make_settings, overrides):
     with pytest.raises(ValidationError):
         make_settings(**overrides)
-
-
-def test_null_context_length_disables_the_cap(make_settings):
-    assert make_settings(ollama_context_length=None).ollama_context_length is None
-
-
-@pytest.mark.parametrize("value", ["null", "NULL", "none", ""])
-def test_context_length_accepts_the_documented_null_spellings(monkeypatch, value):
-    """The README documents SECTOR_AI_OLLAMA_CONTEXT_LENGTH=null, so it must work from the environment."""
-    monkeypatch.setenv("SECTOR_AI_OLLAMA_CONTEXT_LENGTH", value)
-
-    assert env_only().ollama_context_length is None
-
-
-def test_context_length_still_parses_numbers_from_the_environment(monkeypatch):
-    monkeypatch.setenv("SECTOR_AI_OLLAMA_CONTEXT_LENGTH", "8192")
-
-    assert env_only().ollama_context_length == 8192
-
-
-def test_context_length_rejects_a_typo(monkeypatch):
-    monkeypatch.setenv("SECTOR_AI_OLLAMA_CONTEXT_LENGTH", "lots")
-
-    with pytest.raises(ValidationError):
-        env_only()
 
 
 def test_dotenv_file_is_read(tmp_path, monkeypatch):

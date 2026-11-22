@@ -6,7 +6,15 @@ import sys
 
 import pytest
 
-from sector_ai.logging_utils import LOG_FORMAT, TokenRedactingFormatter, configure_logging, redact_token
+from sector_ai.logging_utils import (
+    LOG_FORMAT,
+    TokenRedactingFormatter,
+    configure_logging,
+    redact_for_user,
+    redact_secrets,
+    redact_token,
+    register_secrets,
+)
 from sector_ai.settings import Settings
 
 TOKEN = "7427439607:AAHfake-token-value-for-tests-12345678"
@@ -92,8 +100,81 @@ def test_formatter_output_is_identical_without_a_token():
     plain = logging.Formatter(LOG_FORMAT)
     redacting = TokenRedactingFormatter(LOG_FORMAT, token=TOKEN)
 
-    msg = "Decision: True"
-    assert redacting.format(make_record(msg)) == plain.format(make_record(msg))
+    record = make_record("Decision: True")
+    assert redacting.format(record) == plain.format(record)
+
+
+def test_formatter_redacts_configured_api_secrets():
+    api_key = "sk-live-abcdefghijklmnop"
+    record = make_record("401: %s", (f"Authorization: Bearer {api_key}",))
+
+    output = TokenRedactingFormatter(LOG_FORMAT, token=TOKEN, secrets=[api_key]).format(record)
+
+    assert api_key not in output
+    assert "Authorization: Bearer <redacted>" in output
+
+
+def test_redact_for_user_removes_api_keys_and_bearer_headers():
+    api_key = "sk-live-abcdefghijklmnop"
+    settings = Settings(
+        telegram_bot_token=TOKEN,
+        openai_api_key=api_key,
+        llm_headers={"Authorization": "Bearer header-secret-value"},
+        _env_file=None,
+    )
+
+    text = redact_for_user(f"{api_key} and Bearer header-secret-value", settings)
+
+    assert api_key not in text
+    assert "header-secret-value" not in text
+    assert text.count("<redacted>") == 2
+
+
+def test_short_and_cookie_credentials_are_redacted():
+    settings = Settings(
+        telegram_bot_token=TOKEN,
+        openai_api_key="abc",
+        llm_headers={"Cookie": "session=shh"},
+        _env_file=None,
+    )
+
+    text = redact_for_user("abc and session=shh", settings)
+
+    assert "abc" not in text
+    assert "session=shh" not in text
+
+
+def test_overlapping_secrets_redact_the_longest_first():
+    text = "sk-live-credential-1"
+
+    assert redact_secrets(text, ["sk", "sk-live-credential-1"]) == "<redacted>"
+
+
+def test_in_place_credential_rotation_is_registered(make_context, make_settings):
+    from unittest.mock import patch
+
+    from pydantic import SecretStr
+
+    context = make_context("unused", settings=make_settings())
+    rotated = "sk-in-place-rotated-key"
+    context.settings.openai_api_key = SecretStr(rotated)
+
+    with patch("sector_ai.sector_context.ChatOllama"):
+        context.load_model()
+
+    output = TokenRedactingFormatter(LOG_FORMAT).format(make_record(rotated))
+
+    assert rotated not in output
+
+
+def test_registered_secrets_cover_a_rotated_key():
+    rotated = "sk-rotated-abcdefghijkl"
+    register_secrets(Settings(telegram_bot_token=TOKEN, openai_api_key=rotated, _env_file=None))
+
+    output = TokenRedactingFormatter(LOG_FORMAT, token=TOKEN).format(make_record(rotated))
+
+    assert rotated not in output
+    assert "<redacted>" in output
 
 
 # --- configure_logging ---

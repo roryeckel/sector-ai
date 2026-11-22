@@ -70,7 +70,7 @@ jobs:
             type=sha,prefix=sha-
           labels: |
             org.opencontainers.image.title=Sector AI
-            org.opencontainers.image.description=Telegram bot backed by LangChain and Ollama
+            org.opencontainers.image.description=Telegram bot backed by LangChain, Ollama or any OpenAI-compatible endpoint
             org.opencontainers.image.licenses=GPL-3.0-only
 
       - name: Build and push
