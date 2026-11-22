@@ -164,6 +164,7 @@ class RecordingMessage:
         self.reply_to_message = reply_to_message
         self.from_user = SimpleNamespace(username=username, id=user_id)
         self.chat = SimpleNamespace(id=1)
+        self.chat_id = self.chat.id
         self.calls: list[tuple[str, tuple, dict]] = []
         self._fail_times = fail_times
 
@@ -291,7 +292,11 @@ def make_application(settings, model=None, bot_id: int = 42, username: str = "te
         bot_data=bot_data,
         chat_data=defaultdict(dict),
         user_data=defaultdict(dict),
-        bot=SimpleNamespace(id=bot_id, get_me=get_me),
+        bot=SimpleNamespace(
+            id=bot_id,
+            get_me=get_me,
+            send_message=AsyncMock(return_value=SimpleNamespace(message_id=0)),
+        ),
     )
 
 

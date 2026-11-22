@@ -3,15 +3,27 @@ import contextlib
 import logging
 from collections.abc import AsyncIterator
 
-from telegram import Message
+from telegram import Message, MessageEntity
 from telegram.error import BadRequest, NetworkError
 
 from .logging_utils import redact_for_user
 from .message_text import message_text
 from .retry import retry_on_network_error
 from .sector_context import SectorContext
+from .telegram_format import render_chunks, render_preview, telegram_entities
 
 logger = logging.getLogger(__name__)
+
+
+def _payload_key(text: str, entities: list[MessageEntity] | None) -> tuple:
+    """What Telegram would show. A formatting-only change still needs an edit."""
+    return (
+        text,
+        tuple(
+            (entity.type, entity.offset, entity.length, entity.url, entity.language, entity.custom_emoji_id)
+            for entity in entities or ()
+        ),
+    )
 
 
 async def handle_streaming_response(
@@ -26,35 +38,80 @@ async def handle_streaming_response(
     ended_with_falsy = False
     finish_reason = None
     paused = False
+    entities_ok = True
+    markdown_enabled = context.settings.markdown
+    cursor = context.settings.streaming_cursor or ""
     buffer_lock = asyncio.Lock()
 
-    async def update_message(message_postfix: str = "") -> bool:
-        nonlocal buffer, last_update, response, last_sent
+    async def edit(text: str, entities: list[MessageEntity] | None) -> bool:
+        nonlocal last_sent, last_update, entities_ok
+        key = _payload_key(text, entities)
+        if not text.strip() or key == last_sent:
+            return True
+        try:
+            delivered = await retry_on_network_error(
+                lambda: response_message.edit_text(text, entities=entities or None),
+                what="Telegram edit",
+                delays=(2.0, 5.0),
+            )
+        except BadRequest as error:
+            if "not modified" in str(error).lower():
+                last_sent = key
+                return True
+            if entities:
+                # The server refused the formatting, not the text. Deliver the
+                # same text plainly and stop attaching entities to this reply.
+                entities_ok = False
+                logger.warning("Telegram rejected formatted text (%s); falling back to plain", error)
+                return await edit(text, None)
+            logger.error("Error updating message: %s", error)
+            return False
+        except Exception as error:
+            logger.error("Error updating message: %s", error)
+            return False
+        if delivered is None:
+            return False
+        last_sent = key
+        last_update = asyncio.get_running_loop().time()
+        return True
+
+    async def update_message() -> bool:
+        nonlocal buffer, response
         async with buffer_lock:
             if buffer:
                 response += buffer
             buffer = ""
-        try:
-            new_text = response + message_postfix
-            if new_text.strip() and new_text != last_sent:
-                delivered = await retry_on_network_error(
-                    lambda: response_message.edit_text(new_text),
-                    what="Telegram edit",
-                    delays=(2.0, 5.0),
-                )
-                if delivered is None:
-                    return False
-                last_sent = new_text
-        except BadRequest as e:
-            if "not modified" in str(e).lower():
-                last_sent = new_text
-            else:
-                logger.error(f"Error updating message: {e}")
-                return False
-        except Exception as e:
-            logger.error(f"Error updating message: {e}")
+        text, entities = render_preview(response, enabled=markdown_enabled, cursor=cursor)
+        return await edit(text, telegram_entities(entities) if entities_ok else None)
+
+    async def deliver_final() -> bool:
+        """Edit the placeholder with the first message, then send the rest."""
+        nonlocal buffer, response
+        async with buffer_lock:
+            if buffer:
+                response += buffer
+            buffer = ""
+
+        chunks = render_chunks(response, enabled=markdown_enabled)
+        if not chunks:
+            return True
+
+        text, entities = chunks[0]
+        if not await edit(text, telegram_entities(entities) if entities_ok else None):
             return False
-        last_update = asyncio.get_running_loop().time()
+
+        for text, entities in chunks[1:]:
+            payload = telegram_entities(entities) if entities_ok else None
+            sent = await retry_on_network_error(
+                lambda text=text, payload=payload: context.bot.send_message(
+                    chat_id=response_message.chat_id, text=text, entities=payload
+                ),
+                what="Telegram message",
+                delays=(2.0, 5.0),
+            )
+            if sent is None:
+                logger.error("%s could not deliver every message part", log_prefix)
+                return False
         return True
 
     try:
@@ -79,12 +136,12 @@ async def handle_streaming_response(
                     # still deliver the whole answer.
                     paused = True
                 if not paused:
-                    update_task = asyncio.create_task(update_message(context.settings.streaming_cursor or ""))
+                    update_task = asyncio.create_task(update_message())
 
         if update_task:
             await update_task
 
-        delivered = await update_message()
+        delivered = await deliver_final()
 
         if not response.strip() and (saw_chunk or not ended_with_falsy):
             if finish_reason == "refusal":

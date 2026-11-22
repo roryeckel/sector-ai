@@ -131,6 +131,80 @@ async def test_not_modified_edit_counts_as_delivered(make_context, quiet_setting
     assert response == "hello"
 
 
+async def test_markdown_is_sent_as_entities(make_context, recording_message, quiet_settings):
+    context = make_context(settings=quiet_settings)
+    message = recording_message()
+
+    response = await handle_streaming_response(context, message, aiter_chunks(chunks("**bold**")), "Chat")
+
+    assert response == "**bold**"
+    assert message.texts("edit_text") == ["bold"]
+    entities = message.calls_to("edit_text")[-1][1]["entities"]
+    assert entities[0].type == "bold"
+
+
+async def test_markdown_can_be_disabled(make_context, recording_message, make_settings):
+    settings = make_settings(markdown=False, streaming_interval_sec=999, streaming_chunk_size=999_999)
+    context = make_context(settings=settings)
+    message = recording_message()
+
+    response = await handle_streaming_response(context, message, aiter_chunks(chunks("**bold**")), "Chat")
+
+    assert response == "**bold**"
+    assert message.texts("edit_text") == ["**bold**"]
+    assert message.calls_to("edit_text")[-1][1]["entities"] is None
+
+
+class FormattingRejectingMessage:
+    """Accepts plain text but rejects any styled edit, like Telegram would."""
+
+    def __init__(self):
+        self.chat_id = 1
+        self.calls: list[tuple[str, dict]] = []
+
+    async def edit_text(self, text, **kwargs):
+        self.calls.append((text, kwargs))
+        if kwargs.get("entities"):
+            raise BadRequest("Can't parse entities")
+        return True
+
+
+async def test_rejected_formatting_falls_back_to_plain(make_context, quiet_settings):
+    context = make_context(settings=quiet_settings)
+    message = FormattingRejectingMessage()
+
+    response = await handle_streaming_response(context, message, aiter_chunks(chunks("**bold**")), "Chat")
+
+    assert response == "**bold**"
+    assert message.calls[0][0] == "bold"
+    assert message.calls[0][1]["entities"]
+    assert message.calls[-1] == ("bold", {"entities": None})
+
+
+async def test_a_long_reply_is_split_across_messages(make_context, recording_message, quiet_settings):
+    context = make_context(settings=quiet_settings)
+    message = recording_message()
+
+    response = await handle_streaming_response(context, message, aiter_chunks(chunks("x" * 5000)), "Chat")
+
+    assert response == "x" * 5000
+    assert len(message.texts("edit_text")[0]) == 4096
+    assert context.bot.send_message.await_count == 1
+    assert len(context.bot.send_message.await_args.kwargs["text"]) == 904
+
+
+async def test_a_failed_follow_up_message_is_not_saved(make_context, recording_message, quiet_settings, monkeypatch):
+    monkeypatch.setattr("sector_ai.retry.asyncio.sleep", AsyncMock())
+    context = make_context(settings=quiet_settings)
+    context.bot.send_message = AsyncMock(side_effect=NetworkError("502"))
+    message = recording_message()
+
+    response = await handle_streaming_response(context, message, aiter_chunks(chunks("x" * 5000)), "Chat")
+
+    assert response == ""
+    assert context.bot.send_message.await_count == 3
+
+
 async def test_falsy_chunk_ends_stream(make_context, recording_message):
     context = make_context()
     message = recording_message()
