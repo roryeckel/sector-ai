@@ -20,7 +20,7 @@ from .chat import chat_cmd, handle_chat
 from .coding import code_cmd, html_cmd, svg_cmd
 from .decision import decide_cmd
 from .emoji import emoji_cmd
-from .logging_utils import configure_logging
+from .logging_utils import configure_logging, redact_for_user
 from .poll import poll_cmd
 from .sector_context import SectorContext
 from .settings import LLM_PROVIDERS, LOG_LEVELS, Settings
@@ -58,6 +58,10 @@ async def handle_message(update: Update, context: SectorContext) -> None:
 async def error_handler(update: Update, context: SectorContext) -> None:
     logger.exception("An error occurred", exc_info=context.error)
     error_str = str(context.error)
+    settings = context.bot_data.get("settings")
+    if settings is not None:
+        # Backend errors can echo an Authorization header back to the chat.
+        error_str = redact_for_user(error_str, settings)
     try:
         if update and update.message:
             await update.message.reply_text(error_str)

@@ -4,7 +4,9 @@ import logging
 from collections.abc import AsyncIterator
 
 from telegram import Message
+from telegram.error import BadRequest, NetworkError
 
+from .logging_utils import redact_for_user
 from .message_text import message_text
 from .sector_context import SectorContext
 
@@ -35,6 +37,15 @@ async def handle_streaming_response(
             if new_text.strip() and new_text != last_sent:
                 await response_message.edit_text(new_text)
                 last_sent = new_text
+        except BadRequest as e:
+            # BadRequest subclasses NetworkError, but "message is not modified"
+            # or a deleted message will not succeed on a retry.
+            logger.error(f"Error updating message: {e}")
+            return False
+        except NetworkError:
+            # Let the caller's retry loop see it; a dropped edit means the reply
+            # was not delivered even if generation succeeded.
+            raise
         except Exception as e:
             logger.error(f"Error updating message: {e}")
             return False
@@ -78,8 +89,10 @@ async def handle_streaming_response(
         logger.info(f"{log_prefix} Result: {response}")
         return response
 
+    except NetworkError:
+        raise
     except Exception as e:
-        error_message = f"Error processing {log_prefix.lower()}: {e}"
+        error_message = f"Error processing {log_prefix.lower()}: {redact_for_user(str(e), context.settings)}"
         await response_message.edit_text(error_message)
         logger.error(error_message)
         return ""

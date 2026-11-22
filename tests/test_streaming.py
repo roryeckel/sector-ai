@@ -1,9 +1,11 @@
 """Tests for the streaming message updater."""
 
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from langchain_core.messages import AIMessageChunk
+from telegram.error import NetworkError
 
 from sector_ai.streaming_handler import handle_streaming_response
 
@@ -87,6 +89,14 @@ async def test_edit_failure_stops_streaming_early(make_context, recording_messag
     # flushed once more so the user sees a partial answer rather than a spinner.
     assert response.strip() == "alpha"
     assert len(message.calls_to("edit_text")) == 2
+
+
+async def test_network_error_from_an_edit_propagates(make_context, quiet_settings):
+    context = make_context(settings=quiet_settings)
+    message = SimpleNamespace(edit_text=AsyncMock(side_effect=NetworkError("502")))
+
+    with pytest.raises(NetworkError, match="502"):
+        await handle_streaming_response(context, message, aiter_chunks(chunks("hello")), "Chat")
 
 
 async def test_falsy_chunk_ends_stream(make_context, recording_message):

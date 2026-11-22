@@ -5,6 +5,7 @@ from langchain_core.messages import AIMessage
 from telegram import Update
 from telegram.error import NetworkError
 
+from .logging_utils import redact_for_user
 from .retry import retry_on_network_error
 from .sector_context import SectorContext
 from .streaming_handler import handle_streaming_response
@@ -54,7 +55,7 @@ async def handle_chat(update: Update, context: SectorContext, system_prompt: str
     except Exception as e:
         if response_message is None:
             raise
-        await response_message.edit_text(f"Error processing chat response: {e}")
+        await response_message.edit_text(f"Error processing chat response: {redact_for_user(str(e), context.settings)}")
 
 
 async def chat_cmd(update: Update, context: SectorContext) -> None:

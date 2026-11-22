@@ -6,7 +6,13 @@ import sys
 
 import pytest
 
-from sector_ai.logging_utils import LOG_FORMAT, TokenRedactingFormatter, configure_logging, redact_token
+from sector_ai.logging_utils import (
+    LOG_FORMAT,
+    TokenRedactingFormatter,
+    configure_logging,
+    redact_for_user,
+    redact_token,
+)
 from sector_ai.settings import Settings
 
 TOKEN = "7427439607:AAHfake-token-value-for-tests-12345678"
@@ -94,6 +100,32 @@ def test_formatter_output_is_identical_without_a_token():
 
     record = make_record("Decision: True")
     assert redacting.format(record) == plain.format(record)
+
+
+def test_formatter_redacts_configured_api_secrets():
+    api_key = "sk-live-abcdefghijklmnop"
+    record = make_record("401: %s", (f"Authorization: Bearer {api_key}",))
+
+    output = TokenRedactingFormatter(LOG_FORMAT, token=TOKEN, secrets=[api_key]).format(record)
+
+    assert api_key not in output
+    assert "Authorization: Bearer <redacted>" in output
+
+
+def test_redact_for_user_removes_api_keys_and_bearer_headers():
+    api_key = "sk-live-abcdefghijklmnop"
+    settings = Settings(
+        telegram_bot_token=TOKEN,
+        openai_api_key=api_key,
+        llm_headers={"Authorization": "Bearer header-secret-value"},
+        _env_file=None,
+    )
+
+    text = redact_for_user(f"{api_key} and Bearer header-secret-value", settings)
+
+    assert api_key not in text
+    assert "header-secret-value" not in text
+    assert text.count("<redacted>") == 2
 
 
 # --- configure_logging ---

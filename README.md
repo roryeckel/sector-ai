@@ -61,7 +61,7 @@ Instead of dropping the oldest messages at a fixed count, the bot keeps a runnin
 
 Compaction uses the model server itself, so it works the same on every backend. OpenAI's native Responses compaction is not used: it returns an opaque item that is only valid on that API, and most compatible servers, including Ollama and most self-hosted ones, do not implement it.
 
-If summarization fails, the transcript is left alone and the bot keeps chatting; the history is still bounded by `SECTOR_AI_COMPACTION_MAX_MESSAGES` as a safety net. `/compact` (admin only) forces a compaction and reports the token change.
+If summarization fails, the oldest messages are dropped to fit the window instead and the bot keeps chatting; `SECTOR_AI_COMPACTION_MAX_MESSAGES` still bounds the history as a safety net. `/compact` (admin only) forces a compaction and reports the token change.
 
 ## Features
 
@@ -227,6 +227,7 @@ There is no configuration file. Settings come from environment variables, an opt
 | `SECTOR_AI_COMPACTION_THRESHOLD` | `0.75` | Share of the context window that triggers a compaction. |
 | `SECTOR_AI_COMPACTION_KEEP_MESSAGES` | `8` | Recent messages kept verbatim after a compaction. |
 | `SECTOR_AI_COMPACTION_MAX_MESSAGES` | `500` | Safety cap used when compaction is off or fails. |
+| `SECTOR_AI_COMPACTION_SUMMARY_MAX_CHARS` | `4000` | Maximum summary length; longer summaries are truncated. |
 | `SECTOR_AI_SYSTEM_PROMPTS__<NAME>` | built-in | Override one system prompt, e.g. `SECTOR_AI_SYSTEM_PROMPTS__SVG`. |
 | `SECTOR_AI_LOG_LEVEL` | `INFO` | `CRITICAL`, `ERROR`, `WARNING`, `INFO` or `DEBUG`. |
 

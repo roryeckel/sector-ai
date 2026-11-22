@@ -9,7 +9,7 @@ get through a short network blip instead of silently dropping the message.
 import asyncio
 import logging
 
-from telegram.error import NetworkError
+from telegram.error import BadRequest, NetworkError
 
 logger = logging.getLogger(__name__)
 
@@ -18,11 +18,14 @@ async def retry_on_network_error(call, *, what: str, attempts: int = 3, delays: 
     """Await ``call()``, retrying while it raises a Telegram network error.
 
     Returns the call's result, or ``None`` when every attempt failed. Other
-    exceptions propagate to the caller.
+    exceptions propagate to the caller. ``BadRequest`` subclasses
+    ``NetworkError``, but a rejected request will not succeed on a retry.
     """
     for attempt in range(attempts):
         try:
             return await call()
+        except BadRequest:
+            raise
         except NetworkError as error:
             if attempt == attempts - 1:
                 logger.error("%s failed after %d attempts: %s", what, attempts, error)

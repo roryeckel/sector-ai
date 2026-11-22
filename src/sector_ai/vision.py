@@ -4,6 +4,7 @@ import logging
 from langchain_core.messages import AIMessage, HumanMessage
 from telegram import Update
 
+from .logging_utils import redact_for_user
 from .sector_context import SectorContext
 from .streaming_handler import handle_streaming_response
 
@@ -55,8 +56,9 @@ async def handle_vision(update: Update, context: SectorContext) -> None:
 
         if response:
             context.chat_message_history.append(AIMessage(content=response))
+            context._enforce_history_cap()
 
     except Exception as e:
-        await response_message.edit_text(f"Error processing vision prompt: {e}")
+        await response_message.edit_text(f"Error processing vision prompt: {redact_for_user(str(e), context.settings)}")
     finally:
         context.load_model(old_model)

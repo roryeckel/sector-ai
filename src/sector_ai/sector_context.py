@@ -13,7 +13,7 @@ from telegram import Message
 from telegram.constants import MessageLimit
 from telegram.ext import Application, CallbackContext
 
-from .message_text import message_text
+from .message_text import message_refused, message_text
 from .settings import Settings
 
 logger = logging.getLogger(__name__)
@@ -56,9 +56,13 @@ class SectorContext(CallbackContext):
     @property
     def bot_llm(self) -> BaseChatModel:
         try:
-            return self.bot_data["llm"]
+            self.bot_data["llm"]
         except KeyError:
             return self.load_model()
+        # Settings can change in-process (the /models menu swaps the model); make
+        # sure every caller sees a client built from the current settings.
+        self._refresh_model_if_settings_changed()
+        return self.bot_data["llm"]
 
     # Chat
 
@@ -156,6 +160,10 @@ class SectorContext(CallbackContext):
                 api_key=self.settings.openai_api_key.get_secret_value() or "dummy",
                 timeout=self.settings.llm_timeout,
                 default_headers=self.settings.llm_headers,
+                # This provider is documented as Chat Completions. LangChain
+                # otherwise picks Responses for names like "gpt-5-pro" or a
+                # server alias ending in "codex", which most gateways reject.
+                use_responses_api=False,
                 # One slow local request should not double the configured timeout.
                 max_retries=0,
             )
@@ -286,9 +294,10 @@ class SectorContext(CallbackContext):
     async def get_context_length(self) -> Optional[int]:
         """The server's context window for the active model, when it advertises one.
 
-        Settings win, then a cached server value, then a one-time lookup. A
-        server that does not report a window is cached as unknown so the bot
-        does not ask again on every message.
+        Settings win, then a cached value, then a one-time lookup. A successful
+        response that carries no window is cached as unknown; a timeout or an
+        auth failure is not cached, so fixing the server or its credentials
+        triggers a fresh lookup.
         """
         if self.settings.context_length > 0:
             return self.settings.context_length
@@ -304,22 +313,20 @@ class SectorContext(CallbackContext):
             else:
                 length = await self._ollama_context_length()
         except Exception as error:
-            logger.debug("Could not detect the context length (%s)", error)
-            length = None
+            logger.debug("Could not detect the context length (%s); will retry", error)
+            return None
 
         cache[key] = length
         return length
 
-    def cached_context_length(self) -> Optional[int]:
-        """The window from the settings or a previous lookup, without a request."""
-        if self.settings.context_length > 0:
-            return self.settings.context_length
-        return self.bot_data.get("context_lengths", {}).get(self._context_length_key())
-
     def _context_length_key(self) -> tuple:
         provider = self.settings.llm_provider
         endpoint = (self.settings.openai_base_url if provider == "openai" else self.settings.ollama_url).rstrip("/")
-        return provider, endpoint, self.get_model()
+        key = self.settings.openai_api_key.get_secret_value() if provider == "openai" else ""
+        headers = tuple(sorted(self.settings.llm_headers.items()))
+        # Credentials and headers belong in the key: a 401 or a wrong endpoint
+        # must not leave a stale "unknown" cached against the fixed settings.
+        return provider, endpoint, self.get_model(), hash(headers), hash(key)
 
     async def get_context_budget(self) -> int:
         """The token budget compaction works against."""
@@ -332,7 +339,10 @@ class SectorContext(CallbackContext):
         ) as client:
             response = await client.get(f"{self.settings.openai_base_url.rstrip('/')}/models")
         if not response.is_success:
-            return None
+            if response.status_code in {404, 405, 501}:
+                # The route does not exist here; that will not change.
+                return None
+            raise RuntimeError(f"the model list returned HTTP {response.status_code}")
 
         for entry in response.json().get("data") or []:
             if not isinstance(entry, dict) or entry.get("id") != self.get_model():
@@ -379,9 +389,20 @@ class SectorContext(CallbackContext):
                             return length
             shown = await client.post(f"{base}/api/show", json={"name": self.get_model()})
         if not shown.is_success:
-            return None
+            if shown.status_code in {404, 405, 501}:
+                return None
+            raise RuntimeError(f"the model details returned HTTP {shown.status_code}")
 
         data = shown.json()
+        # An explicit num_ctx is the window the user configured. The
+        # architecture's context_length is training capacity, which is only an
+        # upper bound and can be far above what the server actually serves.
+        for line in str(data.get("parameters") or "").splitlines():
+            parts = line.split()
+            if len(parts) == 2 and parts[0] == "num_ctx":
+                length = _positive_int(parts[1])
+                if length:
+                    return length
         info = data.get("model_info") or {}
         lengths = [
             length
@@ -392,12 +413,6 @@ class SectorContext(CallbackContext):
         ]
         if lengths:
             return max(lengths)
-        for line in str(data.get("parameters") or "").splitlines():
-            parts = line.split()
-            if len(parts) == 2 and parts[0] == "num_ctx":
-                length = _positive_int(parts[1])
-                if length:
-                    return length
         return None
 
     # Token counting
@@ -541,32 +556,40 @@ class SectorContext(CallbackContext):
         """Compact the history when the next request would approach the budget.
 
         Returns True when a compaction happened. Any failure leaves the
-        transcript in place and only applies the safety cap, so a summarizer
-        outage never blocks the chat itself.
+        transcript in place where possible, and the request is still made to fit
+        by dropping the oldest messages as a last resort.
         """
         try:
             if not self.settings.compaction_enabled:
                 self._enforce_history_cap()
                 return False
-            if len(self.chat_message_history) <= self.settings.compaction_keep_messages:
-                return False
-
-            budget = self.cached_context_length() or DEFAULT_CONTEXT_LENGTH
-            estimate = self._estimate_token_count(await self._current_context_messages())
-            # Use the cheap estimate and the already known (or fallback) budget
-            # first; only then ask the server for the real window and count.
-            if estimate < budget * 0.5:
+            if not self.chat_message_history:
                 return False
 
             budget = await self.get_context_budget()
-            tokens = await self.count_context_tokens()
-            if tokens <= budget * self.settings.compaction_threshold:
+            threshold = self.settings.compaction_threshold
+            estimate = self._estimate_token_count(await self._current_context_messages())
+            # A cheap preflight that scales with the configured threshold. The
+            # real window and the exact count are resolved past this point.
+            if estimate < budget * threshold * 0.5:
                 return False
 
-            result = await self.compact()
-            return bool(result.get("compacted"))
+            tokens = await self.count_context_tokens()
+            if tokens <= budget * threshold:
+                return False
+
+            compacted = False
+            try:
+                result = await self.compact()
+                compacted = bool(result.get("compacted"))
+            except Exception:
+                logger.warning("Context compaction failed; dropping the oldest messages", exc_info=True)
+            # Keeping the newest messages verbatim can still leave an oversized
+            # prompt, and a failed summary leaves the old transcript in place.
+            self._trim_to_budget(budget)
+            return compacted
         except Exception:
-            logger.warning("Context compaction failed; keeping the transcript", exc_info=True)
+            logger.warning("Context compaction check failed; keeping the transcript", exc_info=True)
             self._enforce_history_cap()
             return False
 
@@ -577,30 +600,24 @@ class SectorContext(CallbackContext):
         the reply still sees the immediate conversation exactly.
         """
         history = list(self.chat_message_history)
-        keep = self.settings.compaction_keep_messages
-        if len(history) <= keep:
+        if len(history) <= 1:
             return {"compacted": False, "evicted": 0, "kept": len(history), "summary": self.context_summary}
+
+        # Keep the configured tail, but always leave at least one message to
+        # summarize; a forced compaction on a short history still makes progress.
+        keep = max(1, min(self.settings.compaction_keep_messages, len(history) - 1))
 
         evicted = history[:-keep]
         max_chars = self.settings.compaction_summary_max_chars
-        system_prompt = self.settings.system_prompts.compaction.replace("{MAX_CHARS}", str(max_chars))
-        transcript = "\n".join(f"[{message.type}] {message_text(message)}" for message in evicted)
-        prompt = [
-            SystemMessage(content=system_prompt),
-            HumanMessage(
-                content=(
-                    f"Previous summary:\n{self.context_summary or '(none yet)'}\n\n"
-                    f"Transcript to merge into the summary:\n{transcript}"
-                )
-            ),
-        ]
-
-        response = await self.bot_llm.ainvoke(prompt)
-        summary = message_text(response).strip()
-        if not summary:
-            raise RuntimeError("the model returned an empty summary")
-        if len(summary) > max_chars:
-            summary = summary[:max_chars]
+        # Most evictions fit one request. Only a transcript large enough to
+        # approach a server window needs the extra lookup and chunking.
+        tokens = sum(max(1, len(message_text(message)) // 4) for message in evicted)
+        limit = max(256, tokens)
+        if tokens > 2048:
+            limit = max(256, (await self.get_context_budget()) // 2)
+        summary = self.context_summary
+        for chunk in self._summary_chunks(evicted, limit):
+            summary = await self._summarize_chunk(summary, chunk, max_chars)
 
         self.chat_data["message_history"] = history[-keep:]
         self.context_summary = summary
@@ -612,6 +629,64 @@ class SectorContext(CallbackContext):
         self.chat_data.pop("token_count", None)
         logger.info("Compacted %s messages into a %s character summary", len(evicted), len(summary))
         return {"compacted": True, "evicted": len(evicted), "kept": len(history) - len(evicted), "summary": summary}
+
+    async def _summarize_chunk(self, previous: str, messages: list, max_chars: int) -> str:
+        system_prompt = self.settings.system_prompts.compaction.replace("{MAX_CHARS}", str(max_chars))
+        transcript = "\n".join(f"[{message.type}] {message_text(message)}" for message in messages)
+        prompt = [
+            SystemMessage(content=system_prompt),
+            HumanMessage(
+                content=(
+                    f"Previous summary:\n{previous or '(none yet)'}\n\n"
+                    f"Transcript to merge into the summary:\n{transcript}"
+                )
+            ),
+        ]
+
+        response = await self.bot_llm.ainvoke(prompt)
+        if message_refused(response):
+            raise RuntimeError("the model refused to summarize the transcript")
+        summary = message_text(response).strip()
+        if not summary:
+            raise RuntimeError("the model returned an empty summary")
+        return summary[:max_chars]
+
+    @staticmethod
+    def _summary_chunks(messages: list, limit: int) -> list[list]:
+        """Split a transcript so no summarization request is oversized."""
+        chunks = []
+        chunk = []
+        tokens = 0
+        for message in messages:
+            size = max(1, len(message_text(message)) // 4)
+            if chunk and tokens + size > limit:
+                chunks.append(chunk)
+                chunk = []
+                tokens = 0
+            chunk.append(message)
+            tokens += size
+        if chunk:
+            chunks.append(chunk)
+        return chunks
+
+    def _trim_to_budget(self, budget: int) -> None:
+        """Drop the oldest messages until the estimated context fits the window.
+
+        This is the last resort after a compaction that could not free enough,
+        or a summarizer that failed. It trades old context for a request the
+        server can still accept.
+        """
+        limit = budget * self.settings.compaction_threshold * 0.9
+        history = self.chat_message_history
+        keep_from = 0
+        while len(history) - keep_from > 1 and self._estimate_token_count(history[keep_from:]) > limit:
+            keep_from += 1
+        if keep_from:
+            self.chat_data["message_history"] = history[keep_from:]
+            self.chat_data.pop("token_count", None)
+            logger.warning("Dropped %s messages to fit the context window", keep_from)
+        elif len(history) == 1 and self._estimate_token_count(history) > limit:
+            logger.warning("The newest message alone exceeds the context window")
 
     def _enforce_history_cap(self) -> None:
         """Bound memory when compaction is off or failed."""
@@ -636,6 +711,9 @@ class SectorContext(CallbackContext):
         self.chat_message_history.append(
             HumanMessage(name=message.from_user.username, content=f"{message.from_user.username}: {text}")
         )
+        # Messages arrive even when autoreply stays silent, so the cap cannot
+        # wait for the reply path.
+        self._enforce_history_cap()
         return True
 
     def message_exists(self, new_message: ChatMessage) -> bool:

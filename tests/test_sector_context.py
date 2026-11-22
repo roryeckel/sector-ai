@@ -264,6 +264,7 @@ def test_load_model_uses_the_openai_backend(make_context, make_settings):
         "api_key": "dummy",
         "timeout": 12.0,
         "default_headers": {"X-Test": "yes"},
+        "use_responses_api": False,
         "max_retries": 0,
     }
 
@@ -847,3 +848,79 @@ async def test_context_budget_falls_back_to_the_default(make_context, monkeypatc
     monkeypatch.setattr(context, "get_context_length", AsyncMock(return_value=None))
 
     assert await context.get_context_budget() == 8192
+
+
+async def test_ollama_num_ctx_wins_over_training_capacity(make_context):
+    context = make_context("unused")
+
+    def handler(request):
+        if request.url.path.endswith("/api/ps"):
+            return httpx.Response(200, json={"models": []})
+        return httpx.Response(
+            200,
+            json={"model_info": {"qwen3.context_length": 131072}, "parameters": "num_ctx 2048"},
+        )
+
+    with _client_with(handler):
+        assert await context.get_context_length() == 2048
+
+
+async def test_a_transient_context_length_failure_is_not_cached(make_context, make_settings):
+    settings = make_settings(llm_provider="openai")
+    context = make_context("unused", settings=settings)
+    calls = []
+
+    def handler(request):
+        calls.append(str(request.url))
+        raise httpx.ConnectError("no route", request=request)
+
+    with _client_with(handler):
+        assert await context.get_context_length() is None
+        assert await context.get_context_length() is None
+
+    assert len(calls) == 2
+
+
+async def test_a_missing_context_length_route_is_cached(make_context, make_settings):
+    settings = make_settings(llm_provider="openai")
+    context = make_context("unused", settings=settings)
+    calls = []
+
+    def handler(request):
+        calls.append(str(request.url))
+        return httpx.Response(404)
+
+    with _client_with(handler):
+        assert await context.get_context_length() is None
+        assert await context.get_context_length() is None
+
+    assert len(calls) == 1
+
+
+async def test_context_length_is_looked_up_again_after_a_key_change(make_context, make_settings):
+    context = make_context("unused", settings=make_settings(llm_provider="openai", openai_api_key="sk-one"))
+    calls = []
+
+    def handler(request):
+        calls.append(str(request.url))
+        return httpx.Response(200, json={"data": [{"id": "fake-model", "context_length": 4096}]})
+
+    with _client_with(handler):
+        assert await context.get_context_length() == 4096
+        context.settings = make_settings(llm_provider="openai", openai_api_key="sk-two")
+        assert await context.get_context_length() == 4096
+
+    assert len(calls) == 2
+
+
+def test_bot_llm_rebuilds_when_settings_change(make_context, make_settings):
+    context = make_context("unused", settings=make_settings(ollama_url="http://one:11434"))
+
+    with patch("sector_ai.sector_context.ChatOllama") as first:
+        context.load_model()
+        assert context.bot_llm is first.return_value
+
+    context.settings = make_settings(ollama_url="http://two:11434")
+
+    with patch("sector_ai.sector_context.ChatOllama") as second:
+        assert context.bot_llm is second.return_value

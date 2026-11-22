@@ -3,9 +3,19 @@
 from unittest.mock import AsyncMock
 
 import pytest
-from telegram.error import NetworkError, TimedOut
+from telegram.error import BadRequest, NetworkError, TimedOut
 
 from sector_ai.retry import retry_on_network_error
+
+
+async def test_bad_request_is_not_retried(monkeypatch):
+    monkeypatch.setattr("sector_ai.retry.asyncio.sleep", AsyncMock())
+    calls = AsyncMock(side_effect=BadRequest("not modified"))
+
+    with pytest.raises(BadRequest):
+        await retry_on_network_error(calls, what="thing")
+
+    assert calls.await_count == 1
 
 
 async def test_retries_network_errors_until_success(monkeypatch):

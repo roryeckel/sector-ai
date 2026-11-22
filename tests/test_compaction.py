@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock
 import pytest
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
 
 from sector_ai.chat import chat_cmd, handle_chat
 
@@ -18,6 +19,16 @@ class ExplodingModel(BaseChatModel):
 
     def _generate(self, messages, stop=None, run_manager=None, **kwargs):
         raise RuntimeError("model unavailable")
+
+
+class RefusingModel(BaseChatModel):
+    @property
+    def _llm_type(self) -> str:
+        return "refusing"
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        refusal = AIMessage(content=[{"type": "refusal", "refusal": "I cannot summarize that."}])
+        return ChatResult(generations=[ChatGeneration(message=refusal)])
 
 
 def _fill(context, count: int) -> None:
@@ -35,20 +46,19 @@ async def test_short_history_is_not_compacted(make_context, monkeypatch):
     count.assert_not_awaited()
 
 
-async def test_a_small_history_does_not_ask_the_server_for_its_window(make_context, monkeypatch):
+async def test_a_small_history_still_resolves_the_window(make_context, monkeypatch):
     context = make_context("summary")
     _fill(context, 9)
     lookup = AsyncMock(return_value=262144)
     monkeypatch.setattr(context, "get_context_length", lookup)
 
     assert await context.maybe_compact() is False
-    lookup.assert_not_awaited()
+    lookup.assert_awaited_once()
 
 
 async def test_history_below_the_threshold_is_not_compacted(make_context, monkeypatch):
     context = make_context("summary")
     _fill(context, 10)
-    monkeypatch.setattr(context, "cached_context_length", lambda: 100)
     monkeypatch.setattr(context, "get_context_budget", AsyncMock(return_value=100))
     monkeypatch.setattr(context, "count_context_tokens", AsyncMock(return_value=50))
 
@@ -60,7 +70,6 @@ async def test_history_below_the_threshold_is_not_compacted(make_context, monkey
 async def test_old_messages_are_folded_into_the_summary(make_context, monkeypatch):
     context = make_context("Rory likes teal.")
     _fill(context, 12)
-    monkeypatch.setattr(context, "cached_context_length", lambda: 100)
     monkeypatch.setattr(context, "get_context_budget", AsyncMock(return_value=100))
     monkeypatch.setattr(context, "count_context_tokens", AsyncMock(return_value=90))
 
@@ -95,9 +104,37 @@ async def test_compaction_merges_the_previous_summary(make_context, make_setting
     assert "alice: message 1" in sent[1].content
 
 
-async def test_a_short_history_cannot_be_compacted(make_context):
+async def test_an_oversized_transcript_is_summarized_in_chunks(make_context, make_settings, fake_model, monkeypatch):
+    settings = make_settings(compaction_keep_messages=1)
+    context = make_context(model=fake_model("first", "second", "third"), settings=settings)
+    for _ in range(4):
+        context.chat_message_history.append(HumanMessage(content="x" * 3000))
+    monkeypatch.setattr(context, "get_context_budget", AsyncMock(return_value=1000))
+
+    result = await context.compact()
+
+    assert result["compacted"] is True
+    assert result["summary"] == "third"
+    assert len(result["summary"]) > 0
+    assert context.bot_llm.call_count == 3
+    assert "first" in context.bot_llm.received[1][1].content
+    assert "second" in context.bot_llm.received[2][1].content
+
+
+def test_summary_chunks_respect_the_limit():
+    from sector_ai.sector_context import SectorContext
+
+    messages = [HumanMessage(content="x" * 40) for _ in range(5)]
+
+    chunks = SectorContext._summary_chunks(messages, limit=30)
+
+    assert all(sum(len(m.content) // 4 for m in chunk) <= 30 for chunk in chunks)
+    assert [message for chunk in chunks for message in chunk] == messages
+
+
+async def test_a_single_message_cannot_be_compacted(make_context):
     context = make_context("summary")
-    _fill(context, 2)
+    _fill(context, 1)
 
     result = await context.compact()
 
@@ -105,15 +142,26 @@ async def test_a_short_history_cannot_be_compacted(make_context):
     assert context.bot_llm.call_count == 0
 
 
-async def test_summary_failure_keeps_the_transcript(make_context, monkeypatch):
+async def test_summary_failure_keeps_the_transcript_when_it_fits(make_context, monkeypatch):
     context = make_context(model=ExplodingModel())
     _fill(context, 12)
-    monkeypatch.setattr(context, "cached_context_length", lambda: 100)
     monkeypatch.setattr(context, "get_context_budget", AsyncMock(return_value=100))
     monkeypatch.setattr(context, "count_context_tokens", AsyncMock(return_value=90))
 
     assert await context.maybe_compact() is False
     assert len(context.chat_message_history) == 12
+    assert context.context_summary == ""
+
+
+async def test_summary_failure_drops_messages_when_the_request_cannot_fit(make_context, monkeypatch):
+    context = make_context(model=ExplodingModel())
+    for _ in range(12):
+        context.chat_message_history.append(HumanMessage(content="x" * 300))
+    monkeypatch.setattr(context, "get_context_budget", AsyncMock(return_value=100))
+    monkeypatch.setattr(context, "count_context_tokens", AsyncMock(return_value=90))
+
+    assert await context.maybe_compact() is False
+    assert len(context.chat_message_history) == 1
     assert context.context_summary == ""
 
 
@@ -144,7 +192,6 @@ async def test_handle_chat_compacts_before_replying(make_context, make_settings,
     settings = make_settings(streaming_interval_sec=999, streaming_chunk_size=999_999)
     context = make_context(model=fake_model("compacted summary", "fresh reply"), settings=settings)
     _fill(context, 12)
-    monkeypatch.setattr(context, "cached_context_length", lambda: 100)
     monkeypatch.setattr(context, "get_context_budget", AsyncMock(return_value=100))
     monkeypatch.setattr(context, "count_context_tokens", AsyncMock(return_value=90))
 
@@ -187,6 +234,41 @@ async def test_clear_history_drops_the_summary(make_context):
     assert context.context_summary == ""
     assert "context_compaction" not in context.chat_data
     assert "token_count" not in context.chat_data
+
+
+async def test_a_tail_that_still_does_not_fit_is_trimmed(make_context, make_settings, monkeypatch):
+    settings = make_settings(compaction_keep_messages=4)
+    context = make_context("summary", settings=settings)
+    for _ in range(10):
+        context.chat_message_history.append(HumanMessage(content="x" * 300))
+    monkeypatch.setattr(context, "get_context_budget", AsyncMock(return_value=100))
+    monkeypatch.setattr(context, "count_context_tokens", AsyncMock(return_value=90))
+
+    assert await context.maybe_compact() is True
+    # Four kept messages at ~75 tokens each cannot fit a 75-token budget.
+    assert len(context.chat_message_history) < 4
+    assert context.context_summary == "summary"
+
+
+async def test_a_refusal_is_not_saved_as_a_summary(make_context):
+    context = make_context(model=RefusingModel())
+    _fill(context, 10)
+
+    with pytest.raises(RuntimeError, match="refused"):
+        await context.compact()
+
+    assert len(context.chat_message_history) == 10
+    assert context.context_summary == ""
+
+
+def test_passive_messages_respect_the_cap(make_context, make_settings):
+    context = make_context(settings=make_settings(compaction_max_messages=5))
+
+    for i in range(12):
+        context.save_user_message(SimpleNamespace(text=f"hello {i}", from_user=SimpleNamespace(username="alice")))
+
+    assert len(context.chat_message_history) == 5
+    assert context.chat_message_history[-1].content == "alice: hello 11"
 
 
 async def test_disabling_compaction_only_enforces_the_cap(make_context, make_settings):
