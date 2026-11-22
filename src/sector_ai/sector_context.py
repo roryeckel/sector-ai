@@ -40,12 +40,16 @@ def _positive_int(value: object) -> Optional[int]:
 
 
 def _estimate_text_tokens(text: str) -> int:
-    """A conservative character-based bound. Non-ASCII scripts run near one
-    token per character, ASCII prose near four characters per token."""
+    """A conservative character-based bound.
+
+    Non-ASCII scripts and emoji can run to several tokens per character, while
+    ASCII prose stays near four characters per token. Overestimating only costs
+    an exact count; underestimating would let an oversized prompt through.
+    """
     if not text:
         return 0
     ascii_chars = sum(1 for character in text if ord(character) < 128)
-    return max(1, ascii_chars // 4 + (len(text) - ascii_chars))
+    return max(1, ascii_chars // 4 + (len(text) - ascii_chars) * 4)
 
 
 def _split_text(text: str, limit: int) -> list[str]:
@@ -54,7 +58,7 @@ def _split_text(text: str, limit: int) -> list[str]:
     start = 0
     tokens = 0.0
     for index, character in enumerate(text):
-        cost = 0.25 if ord(character) < 128 else 1.0
+        cost = 0.25 if ord(character) < 128 else 4.0
         if tokens + cost > limit and index > start:
             pieces.append(text[start:index])
             start = index
@@ -180,6 +184,9 @@ class SectorContext(CallbackContext):
         stored separately because the two integrations expose it under
         different attributes (``model`` and ``model_name``).
         """
+        # In-place credential changes skip the settings setter; the log
+        # formatter still needs to learn the new value before it is used.
+        register_secrets(self.settings)
         name = model_name or self.settings.default_model
         if self.settings.llm_provider == "openai":
             result = ChatOpenAI(
@@ -647,12 +654,14 @@ class SectorContext(CallbackContext):
 
         evicted = history[:-keep]
         max_chars = self.settings.compaction_summary_max_chars
-        # Room for the compaction prompt, the merged summary and the reply.
         budget = await self.get_context_budget()
-        reserve = min(512, budget // 4) + min(max_chars // 4, budget // 4) + len(self.context_summary) // 4
-        capacity = max(128, budget - reserve)
         summary = self.context_summary
-        for chunk in self._summary_chunks(evicted, capacity):
+        remaining = list(evicted)
+        while remaining:
+            # The summary grows between requests, so size each chunk against
+            # the space left after it and the reply allowance.
+            capacity = self._chunk_capacity(budget, summary, max_chars)
+            chunk, remaining = self._take_summary_chunk(remaining, capacity)
             summary = await self._summarize_chunk(summary, chunk, max_chars)
 
         self.chat_data["message_history"] = history[-keep:]
@@ -687,35 +696,34 @@ class SectorContext(CallbackContext):
             raise RuntimeError("the model returned an empty summary")
         return summary[:max_chars]
 
-    @staticmethod
-    def _summary_chunks(messages: list, limit: int) -> list[list]:
-        """Split a transcript so no summarization request is oversized.
+    def _chunk_capacity(self, budget: int, summary: str, max_chars: int) -> int:
+        """Tokens available for one summarization transcript."""
+        instructions = _estimate_text_tokens(self.settings.system_prompts.compaction)
+        output = min(max_chars // 4, max(1, budget // 4))
+        capacity = budget - instructions - _estimate_text_tokens(summary) - output - 64
+        if capacity < 128:
+            raise RuntimeError("no room to summarize inside the context window")
+        return capacity
 
-        A single message larger than ``limit`` is split into text pieces, which
-        lose only the role marker and keep every word.
-        """
-        chunks = []
+    @staticmethod
+    def _take_summary_chunk(messages: list, limit: int) -> tuple[list, list]:
+        """Take one chunk from the front, splitting an oversized first message."""
         chunk = []
         tokens = 0
-        for message in messages:
+        for index, message in enumerate(messages):
             text = message_text(message)
             size = _estimate_text_tokens(text)
             if size > limit:
+                pieces = _split_text(text, limit)
                 if chunk:
-                    chunks.append(chunk)
-                    chunk = []
-                    tokens = 0
-                chunks.extend([[HumanMessage(content=piece)] for piece in _split_text(text, limit)])
-                continue
+                    return chunk, messages[index:]
+                rest = [HumanMessage(content=piece) for piece in pieces[1:]] + messages[index + 1 :]
+                return [HumanMessage(content=pieces[0])], rest
             if chunk and tokens + size > limit:
-                chunks.append(chunk)
-                chunk = []
-                tokens = 0
+                return chunk, messages[index:]
             chunk.append(message)
             tokens += size
-        if chunk:
-            chunks.append(chunk)
-        return chunks
+        return chunk, []
 
     async def _trim_to_budget(self, budget: int) -> None:
         """Drop context until the complete rendered prompt fits the window.
@@ -732,7 +740,10 @@ class SectorContext(CallbackContext):
             full = self._estimate_token_count(await self._current_context_messages())
             return max(0, full - self._estimate_token_count(history))
 
-        while self.context_summary and await overhead() > limit:
+        # The newest message stays whatever happens, so the summary must leave
+        # room for it as well as for the system prompt.
+        newest = self._estimate_token_count(history[-1:]) if history else 0
+        while self.context_summary and await overhead() + newest > limit:
             summary = self.context_summary
             self.context_summary = summary[: len(summary) // 2]
 
@@ -744,8 +755,10 @@ class SectorContext(CallbackContext):
             self.chat_data["message_history"] = history[keep_from:]
             self.chat_data.pop("token_count", None)
             logger.warning("Dropped %s messages to fit the context window", keep_from)
-        elif len(history) == 1 and base + self._estimate_token_count(history) > limit:
-            logger.warning("The newest message alone exceeds the context window")
+
+        final = self._estimate_token_count(await self._current_context_messages())
+        if final > limit:
+            logger.warning("The context still estimates %s tokens over the window", final - limit)
 
     def _enforce_history_cap(self) -> None:
         """Bound memory when compaction is off or failed."""

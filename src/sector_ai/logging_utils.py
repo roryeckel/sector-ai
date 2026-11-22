@@ -62,7 +62,9 @@ def register_secrets(settings: Settings | None) -> None:
 def redact_secrets(text: str, secrets: Iterable[str]) -> str:
     """Replace token-shaped URLs and any configured secret in ``text``."""
     text = TOKEN_IN_URL.sub("bot<redacted>", text)
-    for secret in secrets:
+    # Longest first, so a short key that prefixes a longer one cannot leave the
+    # rest of the longer credential visible.
+    for secret in sorted(secrets, key=len, reverse=True):
         if secret:
             text = text.replace(secret, "<redacted>")
     return text

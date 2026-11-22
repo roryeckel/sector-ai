@@ -889,7 +889,9 @@ async def test_provisional_ollama_capacity_is_refreshed(make_context, monkeypatc
 def test_estimate_is_conservative_for_non_ascii(make_context):
     context = make_context("unused")
 
-    assert context._estimate_token_count([HumanMessage(content="你" * 100)]) == 100
+    # Each non-ASCII character is treated as four tokens, so an emoji-heavy
+    # prompt is never assumed to fit because of its character count.
+    assert context._estimate_token_count([HumanMessage(content="你" * 100)]) == 400
 
 
 async def test_a_transient_context_length_failure_is_not_cached(make_context, make_settings):

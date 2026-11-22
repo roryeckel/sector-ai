@@ -79,16 +79,27 @@ async def test_generator_error_is_reported_and_returns_empty(make_context, recor
     assert "Error processing chat: boom" in message.texts("edit_text")[-1]
 
 
-async def test_edit_failure_stops_streaming_early(make_context, recording_message, fast_settings):
+async def test_a_failed_intermediate_edit_still_delivers_the_full_answer(
+    make_context, recording_message, fast_settings
+):
     context = make_context(settings=fast_settings)
     message = recording_message(fail_times=1)
 
     response = await handle_streaming_response(context, message, aiter_chunks(chunks("alpha", " ", "beta")), "Chat")
 
-    # Streaming stops at the first failed edit; the text received so far is then
-    # flushed once more so the user sees a partial answer rather than a spinner.
-    assert response.strip() == "alpha"
+    # The first edit fails, so updates pause while the rest of the stream is
+    # consumed; the final flush then delivers the whole answer.
+    assert response == "alpha beta"
     assert len(message.calls_to("edit_text")) == 2
+
+
+async def test_when_every_edit_fails_the_answer_is_not_delivered(make_context, recording_message, fast_settings):
+    context = make_context(settings=fast_settings)
+    message = recording_message(fail_times=10)
+
+    response = await handle_streaming_response(context, message, aiter_chunks(chunks("alpha", " ", "beta")), "Chat")
+
+    assert response == ""
 
 
 async def test_network_error_from_an_edit_is_retried_then_returns_empty(make_context, quiet_settings, monkeypatch):

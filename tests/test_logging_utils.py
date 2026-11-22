@@ -11,6 +11,7 @@ from sector_ai.logging_utils import (
     TokenRedactingFormatter,
     configure_logging,
     redact_for_user,
+    redact_secrets,
     redact_token,
     register_secrets,
 )
@@ -141,6 +142,29 @@ def test_short_and_cookie_credentials_are_redacted():
 
     assert "abc" not in text
     assert "session=shh" not in text
+
+
+def test_overlapping_secrets_redact_the_longest_first():
+    text = "sk-live-credential-1"
+
+    assert redact_secrets(text, ["sk", "sk-live-credential-1"]) == "<redacted>"
+
+
+def test_in_place_credential_rotation_is_registered(make_context, make_settings):
+    from unittest.mock import patch
+
+    from pydantic import SecretStr
+
+    context = make_context("unused", settings=make_settings())
+    rotated = "sk-in-place-rotated-key"
+    context.settings.openai_api_key = SecretStr(rotated)
+
+    with patch("sector_ai.sector_context.ChatOllama"):
+        context.load_model()
+
+    output = TokenRedactingFormatter(LOG_FORMAT).format(make_record(rotated))
+
+    assert rotated not in output
 
 
 def test_registered_secrets_cover_a_rotated_key():

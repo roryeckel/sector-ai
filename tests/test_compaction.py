@@ -122,24 +122,26 @@ async def test_an_oversized_transcript_is_summarized_in_chunks(make_context, mak
     assert "first" in context.bot_llm.received[1][1].content
 
 
-def test_summary_chunks_respect_the_limit():
+def test_take_summary_chunk_stops_at_the_limit():
     from sector_ai.sector_context import SectorContext
 
     messages = [HumanMessage(content="x" * 40) for _ in range(5)]
 
-    chunks = SectorContext._summary_chunks(messages, limit=30)
+    chunk, rest = SectorContext._take_summary_chunk(messages, limit=30)
 
-    assert all(sum(len(m.content) // 4 for m in chunk) <= 30 for chunk in chunks)
-    assert [message for chunk in chunks for message in chunk] == messages
+    assert len(chunk) == 3
+    assert rest == messages[3:]
 
 
-def test_summary_chunks_split_a_single_oversized_message():
+def test_take_summary_chunk_splits_a_single_oversized_message():
     from sector_ai.sector_context import SectorContext
 
-    chunks = SectorContext._summary_chunks([HumanMessage(content="x" * 400)], limit=20)
+    chunk, rest = SectorContext._take_summary_chunk([HumanMessage(content="x" * 400)], limit=20)
 
-    assert len(chunks) == 5
-    assert "".join(chunk[0].content for chunk in chunks) == "x" * 400
+    assert len(chunk) == 1
+    assert len(chunk[0].content) == 80
+    assert len(rest) == 4
+    assert chunk[0].content + "".join(message.content for message in rest) == "x" * 400
 
 
 async def test_a_single_message_cannot_be_compacted(make_context):

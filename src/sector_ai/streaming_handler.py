@@ -25,6 +25,7 @@ async def handle_streaming_response(
     saw_chunk = False
     ended_with_falsy = False
     finish_reason = None
+    paused = False
     buffer_lock = asyncio.Lock()
 
     async def update_message(message_postfix: str = "") -> bool:
@@ -69,14 +70,16 @@ async def handle_streaming_response(
                 buffer += message_text(chunk)
 
             current_time = asyncio.get_running_loop().time()
-            if (
+            if not paused and (
                 current_time - last_update >= context.settings.streaming_interval_sec
                 or len(buffer) >= context.settings.streaming_chunk_size
             ):
-                if update_task:
-                    if not await update_task:
-                        break
-                update_task = asyncio.create_task(update_message(context.settings.streaming_cursor or ""))
+                if update_task and not await update_task:
+                    # Keep consuming the model stream so the final flush can
+                    # still deliver the whole answer.
+                    paused = True
+                if not paused:
+                    update_task = asyncio.create_task(update_message(context.settings.streaming_cursor or ""))
 
         if update_task:
             await update_task
