@@ -812,3 +812,20 @@ async def test_new_tool_transaction_does_not_reuse_historical_ids(agent_context,
     calls = [item for item in context.chat_message_history if isinstance(item, AIMessage) and item.tool_calls]
     assert len(calls) == 2
     assert calls[0].tool_calls[0]["id"] != calls[1].tool_calls[0]["id"]
+
+
+async def test_a_failed_continuation_never_overwrites_or_deletes_the_delivered_answer(agent_context, make_update):
+    from telegram.error import BadRequest
+
+    context = agent_context(AIMessage(content="x" * 5000))
+    context.bot.send_message = AsyncMock(side_effect=BadRequest("message thread not found"))
+    update = make_update(text="long please", message_id=10)
+
+    await run_agent(update, context, force=True)
+
+    # The first part stays on screen as delivered; no fallback text over it.
+    assert update.message.shown() == ["x" * 4096]
+    # History records what the user saw, not the parts that never arrived.
+    assert context.chat_message_history[-1].content == "x" * 4096
+    # Its cursor was replaced, so the next turn must not delete it.
+    assert "pending_placeholder" not in context.conversation_data

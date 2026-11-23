@@ -198,6 +198,20 @@ class RecordingMessage:
             self._fail_times -= 1
             raise BadRequest(f"{name} failed")
 
+    _is_topic_message = None
+
+    @property
+    def is_topic_message(self):
+        """A thread ID means a forum topic unless a test sets this explicitly
+        (``False`` models a reply chain in an ordinary supergroup)."""
+        if self._is_topic_message is not None:
+            return self._is_topic_message
+        return getattr(self, "message_thread_id", None) is not None
+
+    @is_topic_message.setter
+    def is_topic_message(self, value):
+        self._is_topic_message = value
+
     async def reply_text(self, text, **kwargs):
         self._record("reply_text", (text,), kwargs)
         return self

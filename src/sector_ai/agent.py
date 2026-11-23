@@ -17,7 +17,7 @@ from jsonschema.validators import validator_for
 from langchain_core.messages import AIMessage, SystemMessage, ToolMessage, message_chunk_to_message
 from langgraph.graph import END, START, StateGraph
 from referencing import Registry
-from telegram.error import NetworkError
+from telegram.error import NetworkError, TelegramError
 
 from . import debounce as debounce_turns
 from .autoreply import should_respond
@@ -348,8 +348,15 @@ async def _run_turn(
                 return {"pending": response.tool_calls, "iterations": state.get("iterations", 0) + 1}
             if delivered_text and save_ai_message:
                 context.save_assistant_message(delivered_text, placeholder.message)
-            elif not state.get("delivered") and not delivered_text:
-                await placeholder.write("The model returned an empty response.")
+            elif (
+                not state.get("delivered")
+                and not delivered_text
+                and not placeholder.failed
+                and placeholder.message is None
+            ):
+                # Only when nothing reached the chat: never over delivered or
+                # partly delivered text, and never for a failed send.
+                await placeholder.notify("The model returned an empty response.")
             return {"finished": True}
 
         async def tool_node(state):
@@ -477,7 +484,6 @@ async def _run_turn(
                     logger.info("Turn for message(s) %s was superseded before replying", sorted(turn.message_ids))
                     return
                 raise
-            context.finish_placeholder()
         except Exception as error:
             # A timed-out/cancelled batch must still have a result per call.
             if turn is not None and turn.superseded and not turn.committed:
@@ -496,10 +502,13 @@ async def _run_turn(
                 else redact_for_user(str(error), context.settings)
             )
             if placeholder is not None:
-                await placeholder.write(f"Error processing chat response: {text}")
-                context.finish_placeholder()
+                # Posted separately when an answer is already on screen.
+                await placeholder.notify(f"Error processing chat response: {text}")
             else:
-                await update.effective_message.reply_text(text)
+                try:
+                    await update.effective_message.reply_text(text)
+                except TelegramError as reply_error:
+                    logger.error("Could not report a failed turn: %s", reply_error)
         except asyncio.CancelledError:
             if pending_message is not None:
                 _close_pending(context, pending_message)
@@ -509,6 +518,9 @@ async def _run_turn(
                 graph_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await graph_task
+            # Forget every delivered reply, on every exit path; only a message
+            # whose final edit failed stays tracked for cleanup.
+            context.finish_placeholder()
             await indicator.aclose()
             context._turn = None
             context._request_model = None

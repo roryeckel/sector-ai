@@ -32,7 +32,6 @@ async def stream_chat(
             )
         return
 
-    response = ""
     try:
         for attempt in range(3):
             try:
@@ -43,19 +42,20 @@ async def stream_chat(
                 messages = context.get_templated_messages(system_prompt=system_prompt).format_messages(
                     **await context.get_system_template_dict()
                 )
-                budget = await context.get_context_budget()
-                if context._estimate_token_count(messages) > budget * 0.9:
-                    raise ValueError("Conversation exceeds the model's context window. Compact or clear context.")
-                logger.info("Respond Prompt: %s", messages)
-                stream_generator = context.bind_cache(context.bot_llm, "chat").astream(messages)
-                response = await handle_streaming_response(context, response_message, stream_generator, "Chat")
                 break
             except NetworkError as e:
-                response = ""
+                # Preparation only (get_me and friends); nothing was sent yet.
                 if attempt == 2:
                     raise
-                logger.warning("Telegram network error while chatting (%s); retrying", e)
+                logger.warning("Telegram network error while preparing a reply (%s); retrying", e)
                 await asyncio.sleep(5.0 * (attempt + 1))
+        budget = await context.get_context_budget()
+        if context._estimate_token_count(messages) > budget * 0.9:
+            raise ValueError("Conversation exceeds the model's context window. Compact or clear context.")
+        logger.info("Respond Prompt: %s", messages)
+        stream_generator = context.bind_cache(context.bot_llm, "chat").astream(messages)
+        # Delivery failures are handled inside and never re-run the model.
+        response = await handle_streaming_response(context, response_message, stream_generator, "Chat")
 
         if response.startswith("AI:"):
             logger.warning("Removing AI Prefix from response")
@@ -63,12 +63,11 @@ async def stream_chat(
 
         if save_ai_message and response:
             context.save_assistant_message(response, response_message.message)
-        context.finish_placeholder()
-
     except NetworkError:
         raise
     except Exception as e:
-        await response_message.write(f"Error processing chat response: {redact_for_user(str(e), context.settings)}")
+        await response_message.notify(f"Error processing chat response: {redact_for_user(str(e), context.settings)}")
+    finally:
         context.finish_placeholder()
 
 

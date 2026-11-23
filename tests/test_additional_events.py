@@ -37,6 +37,7 @@ def text_update(text="original", *, edited=False, update_id=501, message_id=10, 
         message["entities"] = [{"type": "bot_command", "offset": 0, "length": len(text.split()[0])}]
     if thread:
         message["message_thread_id"] = thread
+        message["is_topic_message"] = True
     if edited:
         message["edit_date"] = edit_at
     return Update.de_json({"update_id": update_id, "edited_message" if edited else "message": message}, None)

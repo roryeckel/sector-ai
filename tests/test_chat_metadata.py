@@ -253,6 +253,7 @@ def service_update(event_fields, *, thread=None):
     }
     if thread:
         message["message_thread_id"] = thread
+        message["is_topic_message"] = True
     if message.get("new_chat_members"):
         message["new_chat_members"] = [{"is_bot": False, **user} for user in message["new_chat_members"]]
     if message.get("left_chat_member"):

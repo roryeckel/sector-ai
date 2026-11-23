@@ -69,7 +69,9 @@ made by users are not observed, because polling still does not subscribe to
 responses, but are not autonomous tools. Administrative controls are not tools.
 History is shared within a chat/forum topic, not across topics or chats.
 Long replies and their continuation messages stay in the originating forum
-topic. `/clear` resets the current conversation's transcript, summary, and tool
+topic. Replies in ordinary supergroups also carry a thread ID, but it names a
+reply chain, not a topic, so it is neither sent back nor used as a conversation
+key. `/clear` resets the current conversation's transcript, summary, and tool
 context. All history is lost when the process exits, as before this uplift.
 
 ## Time, metadata, events, and engagement
@@ -381,10 +383,21 @@ Once the bot decides to respond (never while it is still deciding whether to),
 the chat shows Telegram's typing indicator until the turn ends. No placeholder
 message is posted: the reply appears with the first visible text, carrying the
 streaming cursor, and a turn that only sends a poll, artifact or reaction
-leaves no empty message behind. If an edit that would replace the cursor fails,
-that message is remembered for the whole turn and deleted at the start of the
-next one, so a failed delivery cannot leave a second cursor in the chat. A
-successful turn forgets its reply instead.
+leaves no empty message behind. If the final edit that would replace the cursor
+fails, that one message is remembered and deleted at the start of the next turn,
+so a failed delivery cannot leave a second cursor in the chat. Every delivered
+reply is forgotten when the turn ends, on every exit path, and a failure later
+in the turn (a continuation part, another reply) never marks an earlier
+delivered message for deletion. When a long answer's first part arrives but a
+continuation part fails (after retrying it as plain text), the delivered part
+stays on screen, is not replaced by a fallback such as "empty response", and is
+what history records. Errors after text is visible are posted as a separate
+message instead of overwriting the answer.
+
+The first send of a reply is retried after a network timeout. Telegram cannot
+say whether a timed-out send arrived, so in rare cases this posts a duplicate
+partial message with a cursor that the bot cannot track. That risk is accepted
+over losing the reply entirely.
 The model can explain the uncertainty but cannot automatically resend. If a
 multi-tool run is interrupted, an interrupted-delivery receipt is attributed
 only to the tool call that was actually executing; calls that never started are

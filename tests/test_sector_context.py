@@ -964,3 +964,27 @@ def test_bot_llm_rebuilds_when_settings_change(make_context, make_settings):
 
     with patch("sector_ai.sector_context.ChatOllama") as second:
         assert context.bot_llm is second.return_value
+
+
+def test_a_reply_chain_in_an_ordinary_group_stays_in_the_main_conversation(make_context, make_update):
+    context = make_context()
+    main = make_update(text="hello")
+    context.bind_update(main)
+    context.conversation_data["marker"] = "main"
+
+    reply = make_update(text="a reply", thread_id=77)
+    reply.message.is_topic_message = False
+    context.bind_update(reply)
+
+    assert context.conversation_data.get("marker") == "main"
+    assert "topics" not in context.chat_data
+
+
+def test_a_forum_topic_gets_its_own_conversation(make_context, make_update):
+    context = make_context()
+    context.bind_update(make_update(text="hello"))
+    context.conversation_data["marker"] = "main"
+
+    context.bind_update(make_update(text="in a topic", thread_id=77))
+
+    assert "marker" not in context.conversation_data

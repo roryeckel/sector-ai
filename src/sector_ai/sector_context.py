@@ -109,8 +109,11 @@ class SectorContext(CallbackContext):
         self._turn = None
 
     def bind_update(self, update) -> None:
-        thread = getattr(update.effective_message, "message_thread_id", None)
-        self.bind_topic(thread)
+        message = update.effective_message
+        # Replies in ordinary supergroups carry a thread ID too, naming the
+        # reply chain. Only a forum (or private-chat) topic is a conversation.
+        thread = getattr(message, "message_thread_id", None)
+        self.bind_topic(thread if getattr(message, "is_topic_message", False) is True else None)
         chat = getattr(update, "effective_chat", None) or getattr(update.effective_message, "chat", None)
         metadata = self.chat_data.setdefault("chat_metadata", {})
         identifier = getattr(chat, "id", None)
@@ -132,11 +135,11 @@ class SectorContext(CallbackContext):
             self.conversation_data.setdefault("topic_metadata", {})["id"] = self._message_thread_id
 
     def remember_placeholder(self, message) -> None:
-        """Track the current processing placeholder so a failed turn can clean it."""
+        """Track the reply being streamed so a cursor it leaves behind can be cleaned."""
         message_id = getattr(message, "message_id", None)
         if type(message_id) is int and type(self._chat_id) is int:
             previous = self.conversation_data.get("pending_placeholder")
-            if self.conversation_data.get("placeholder_unsettled") and isinstance(previous, dict):
+            if self._unsettled(previous):
                 # An earlier reply in this turn still shows a cursor. A later
                 # reply must not take over its slot and forget it.
                 self.conversation_data.setdefault("abandoned_placeholders", []).append(previous)
@@ -146,17 +149,42 @@ class SectorContext(CallbackContext):
             }
             self.conversation_data.pop("placeholder_unsettled", None)
 
-    def settle_placeholder(self) -> None:
-        """Record that the latest edit replaced the streaming cursor."""
-        self.conversation_data.pop("placeholder_unsettled", None)
+    def _unsettled(self, pending) -> bool:
+        """Whether ``pending`` is the message whose final edit failed."""
+        return isinstance(pending, dict) and self.conversation_data.get("placeholder_unsettled") == pending.get(
+            "message_id"
+        )
 
-    def mark_placeholder_unsettled(self) -> None:
-        """A failed edit may have left the cursor visible in the placeholder."""
-        self.conversation_data["placeholder_unsettled"] = True
+    def settle_placeholder(self, message) -> None:
+        """Record that the final edit of ``message`` replaced its streaming cursor."""
+        if self.conversation_data.get("placeholder_unsettled") == getattr(message, "message_id", None):
+            self.conversation_data.pop("placeholder_unsettled", None)
+
+    def mark_placeholder_unsettled(self, message) -> None:
+        """The final edit of ``message`` failed, so it may still show the cursor.
+
+        Only that message is cleaned up later. A delivered reply, or a failure
+        before any message existed, never marks anything.
+        """
+        message_id = getattr(message, "message_id", None)
+        if type(message_id) is not int:
+            return
+        pending = self.conversation_data.get("pending_placeholder")
+        if isinstance(pending, dict) and pending.get("message_id") == message_id:
+            self.conversation_data["placeholder_unsettled"] = message_id
+            return
+        chat_id = getattr(message, "chat_id", None)
+        chat_id = chat_id if type(chat_id) is int else self._chat_id
+        if type(chat_id) is int:
+            # Not the tracked reply (an already posted message passed in), so
+            # it gets its own cleanup slot.
+            self.conversation_data.setdefault("abandoned_placeholders", []).append(
+                {"message_id": message_id, "chat_id": chat_id}
+            )
 
     def finish_placeholder(self) -> None:
-        """Forget the placeholder unless its last delivery left a cursor behind."""
-        if self.conversation_data.pop("placeholder_unsettled", False):
+        """Forget the tracked reply unless its final edit left a cursor behind."""
+        if self._unsettled(self.conversation_data.get("pending_placeholder")):
             # Keep pending_placeholder so the next turn removes the artifact.
             return
         self.clear_pending_placeholder()

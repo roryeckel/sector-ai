@@ -213,35 +213,56 @@ async def test_successful_delivery_keeps_tracking_until_the_turn_finishes(
     assert "pending_placeholder" not in context.conversation_data
 
 
-async def test_mid_turn_delivery_failure_keeps_the_placeholder_for_the_next_turn(
+async def test_a_later_failed_send_never_marks_an_earlier_delivered_reply(
     make_context, recording_message, quiet_settings
 ):
+    # Reply 1 is delivered and settled. Reply 2 fails on its first send, so no
+    # message exists for it. Nothing may be deleted at the next turn.
     context = make_context(settings=quiet_settings)
-    context.conversation_data["pending_placeholder"] = {"chat_id": 1, "message_id": 42}
-    message = recording_message()
-    await handle_streaming_response(context, message, aiter_chunks(chunks("First")), "Chat")
-    failed = recording_message(fail_times=1)
+    first_source = recording_message()
+    first_source.message_id = 100
+    await handle_streaming_response(context, LazyReply(context, first_source), aiter_chunks(chunks("First")), "Chat")
+    second = LazyReply(context, recording_message(fail_times=1))
 
-    response = await handle_streaming_response(context, failed, aiter_chunks(chunks("Second")), "Chat")
+    response = await handle_streaming_response(context, second, aiter_chunks(chunks("Second")), "Chat")
     context.finish_placeholder()
+    await context.remove_pending_placeholder()
 
     assert response == ""
-    assert context.conversation_data["pending_placeholder"]["message_id"] == 42
+    assert second.failed is True
+    context.bot.delete_message.assert_not_awaited()
 
 
 async def test_failed_delivery_keeps_pending_placeholder_for_cleanup(make_context, recording_message, quiet_settings):
     context = make_context(settings=quiet_settings)
     context.conversation_data["pending_placeholder"] = {"chat_id": 1, "message_id": 42}
     message = recording_message(fail_times=1)
+    message.message_id = 42
 
     response = await handle_streaming_response(context, message, aiter_chunks(chunks("Hello")), "Chat")
 
     assert response == ""
     assert context.conversation_data["pending_placeholder"]["message_id"] == 42
-    assert context.conversation_data["placeholder_unsettled"] is True
+    assert context.conversation_data["placeholder_unsettled"] == 42
 
     context.finish_placeholder()
     assert context.conversation_data["pending_placeholder"]["message_id"] == 42
+
+
+async def test_a_failed_edit_of_an_untracked_message_gets_its_own_cleanup_slot(
+    make_context, recording_message, quiet_settings
+):
+    context = make_context(settings=quiet_settings)
+    context.conversation_data["pending_placeholder"] = {"chat_id": 1, "message_id": 42}
+    message = recording_message(fail_times=1)
+    message.message_id = 43
+
+    await handle_streaming_response(context, message, aiter_chunks(chunks("Hello")), "Chat")
+    context.finish_placeholder()
+    await context.remove_pending_placeholder()
+
+    deleted = [call.kwargs["message_id"] for call in context.bot.delete_message.await_args_list]
+    assert deleted == [43]
 
 
 async def test_remove_pending_placeholder_deletes_the_message(make_context):
@@ -259,7 +280,7 @@ async def test_remove_pending_placeholder_deletes_the_message(make_context):
 async def test_a_later_reply_does_not_forget_an_earlier_cursor_left_behind(make_context):
     context = make_context()
     context.remember_placeholder(SimpleNamespace(message_id=42))
-    context.mark_placeholder_unsettled()  # its final edit failed
+    context.mark_placeholder_unsettled(SimpleNamespace(message_id=42))  # its final edit failed
 
     context.remember_placeholder(SimpleNamespace(message_id=43))
     context.finish_placeholder()
@@ -317,6 +338,7 @@ async def test_long_reply_continuations_stay_in_the_originating_topic(make_conte
     context = make_context(settings=quiet_settings)
     message = recording_message()
     message.message_thread_id = 42
+    message.is_topic_message = True
 
     response = await handle_streaming_response(context, message, aiter_chunks(chunks("x" * 5000)), "Chat")
 
@@ -325,16 +347,54 @@ async def test_long_reply_continuations_stay_in_the_originating_topic(make_conte
     assert context.bot.send_message.await_args.kwargs["message_thread_id"] == 42
 
 
-async def test_a_failed_follow_up_message_is_not_saved(make_context, recording_message, quiet_settings, monkeypatch):
+async def test_a_reply_chain_thread_id_is_not_sent_back(make_context, recording_message, quiet_settings):
+    # Replies in ordinary supergroups carry a thread ID that names the reply
+    # chain, not a forum topic.
+    context = make_context(settings=quiet_settings)
+    message = recording_message()
+    message.message_thread_id = 42
+    message.is_topic_message = False
+
+    await handle_streaming_response(context, message, aiter_chunks(chunks("x" * 5000)), "Chat")
+
+    assert "message_thread_id" not in context.bot.send_message.await_args.kwargs
+
+
+async def test_a_failed_follow_up_message_saves_only_the_delivered_part(
+    make_context, recording_message, quiet_settings, monkeypatch
+):
     monkeypatch.setattr("sector_ai.retry.asyncio.sleep", AsyncMock())
     context = make_context(settings=quiet_settings)
     context.bot.send_message = AsyncMock(side_effect=NetworkError("502"))
-    message = recording_message()
+    reply = LazyReply(context, recording_message())
 
-    response = await handle_streaming_response(context, message, aiter_chunks(chunks("x" * 5000)), "Chat")
+    response = await handle_streaming_response(context, reply, aiter_chunks(chunks("x" * 5000)), "Chat")
 
-    assert response == ""
+    assert response == "x" * 4096
+    assert reply.failed is True
     assert context.bot.send_message.await_count == 3
+
+
+async def test_a_rejected_formatted_follow_up_is_sent_plain(make_context, recording_message, quiet_settings):
+    context = make_context(settings=quiet_settings)
+    sent = []
+
+    async def send_message(**kwargs):
+        if kwargs.get("entities"):
+            raise BadRequest("can't parse entities")
+        sent.append(kwargs)
+        return SimpleNamespace(message_id=7)
+
+    context.bot.send_message = send_message
+    reply = LazyReply(context, recording_message())
+
+    response = await handle_streaming_response(
+        context, reply, aiter_chunks(chunks("x" * 4090 + "\n\n**bold** tail")), "Chat"
+    )
+
+    assert reply.failed is False
+    assert response.endswith("tail")
+    assert sent and sent[-1]["entities"] is None
 
 
 async def test_falsy_chunk_ends_stream(make_context, recording_message):
@@ -472,3 +532,22 @@ async def test_pending_update_cancelled_on_error(make_context, recording_message
     assert response == ""
     # The error message must survive; the pending cursor edit is cancelled.
     assert message.texts("edit_text")[-1] == "Error processing chat: boom"
+
+
+async def test_a_notice_after_visible_text_is_posted_separately(make_context, recording_message):
+    context = make_context()
+    source = recording_message()
+    reply = LazyReply(context, source)
+    await reply.write("partial answer")
+
+    assert await reply.notify("Error processing chat response: timed out") is True
+
+    assert source.texts("reply_text") == ["partial answer", "Error processing chat response: timed out"]
+    assert source.texts("edit_text") == []
+
+
+async def test_a_notice_that_telegram_rejects_never_raises(make_context, recording_message):
+    context = make_context()
+    reply = LazyReply(context, recording_message(fail_times=1))
+
+    assert await reply.notify("Error") is False
