@@ -62,13 +62,28 @@ async def test_topic_rejects_too_few_topics(make_context, make_update):
     assert context.chat_message_history[-1].status == "error"
 
 
-async def test_topic_rejects_overlong_topic(make_context, make_update):
-    context = make_context(topic_json("a" * (PollLimit.MAX_OPTION_LENGTH + 1), "beta"))
+async def test_topic_poll_fits_telegram_limits_instead_of_failing(make_context, make_update):
+    # A busy chat or a long title must not make /topic fail outright.
+    topics = ["a" * (PollLimit.MAX_OPTION_LENGTH + 1), *(f"topic {n}" for n in range(PollLimit.MAX_OPTION_NUMBER + 2))]
+    context = make_context(topic_json(*topics, title="t" * (PollLimit.MAX_QUESTION_LENGTH + 5)))
     update = make_update(text="/topic")
 
     await topic_poll_cmd(update, context)
-    assert update.message.calls_to("reply_poll") == []
-    assert context.chat_message_history[-1].status == "error"
+
+    (question, options), _ = update.message.calls_to("reply_poll")[0]
+    assert len(question) == PollLimit.MAX_QUESTION_LENGTH
+    assert len(options) == PollLimit.MAX_OPTION_NUMBER
+    assert options[0] == "a" * PollLimit.MAX_OPTION_LENGTH
+
+
+def test_topic_format_instructions_state_the_limits():
+    from langchain_core.output_parsers import PydanticOutputParser
+
+    from sector_ai.capabilities import TopicContent
+
+    instructions = PydanticOutputParser(pydantic_object=TopicContent).get_format_instructions()
+    assert str(PollLimit.MAX_OPTION_NUMBER) in instructions
+    assert str(PollLimit.MAX_OPTION_LENGTH) in instructions
 
 
 async def test_topic_falls_back_to_default_title(make_context, make_update):

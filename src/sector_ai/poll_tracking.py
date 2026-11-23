@@ -1,11 +1,13 @@
 """Bounded, process-local routing for polls this bot actually delivered."""
 
+from telegram.constants import PollLimit
+
 from .chat_metadata import text_value
 
 MAX_TRACKED_POLLS = 512
 
-#: Telegram allows at most ten answers in a regular poll.
-MAX_POLL_OPTIONS = 10
+#: As many answers as Telegram allows in a poll (the poll tools allow the same).
+MAX_POLL_OPTIONS = PollLimit.MAX_OPTION_NUMBER
 
 
 def poll_option_snapshot(poll) -> list[dict]:

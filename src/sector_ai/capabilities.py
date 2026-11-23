@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from io import BytesIO
 from xml.etree import ElementTree
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.prompts import PromptTemplate
 from pydantic import BaseModel, Field
@@ -43,8 +43,22 @@ class PollContent(BaseModel):
 
 
 class TopicContent(BaseModel):
-    title: str
-    topics: list[str]
+    title: str = Field(
+        description=f"A short title about the chat topics, at most {PollLimit.MAX_QUESTION_LENGTH} characters"
+    )
+    topics: list[str] = Field(
+        description=(
+            f"{PollLimit.MIN_OPTION_NUMBER} to {PollLimit.MAX_OPTION_NUMBER} short topics discussed in the chat, "
+            f"each at most {PollLimit.MAX_OPTION_LENGTH} characters"
+        )
+    )
+
+    def as_poll(self) -> "PollContent":
+        """Fit Telegram's limits instead of failing on a long title or a busy chat."""
+        topics = [topic.strip()[: PollLimit.MAX_OPTION_LENGTH] for topic in self.topics if topic.strip()]
+        topics = list(dict.fromkeys(topics))[: PollLimit.MAX_OPTION_NUMBER]
+        title = (self.title.strip() or "Topics")[: PollLimit.MAX_QUESTION_LENGTH]
+        return PollContent(question=title, options=topics)
 
 
 @dataclass
@@ -58,6 +72,11 @@ class GeneratedOutput:
 # A delivered result is already on screen. Say so in the receipt, so the next
 # model step does not restate content the user can see. Reactions carry a
 # similar note. Other tools' results are private and must be relayed instead.
+#: The document's caption: none, the file name says enough. Never the request
+#: itself: in the agent path that is written by the model and may hold raw HTML
+#: or instructions.
+HTML_CAPTION = ""
+
 DELIVERY_NOTES = {
     "svg": "Delivered as an image in this chat; the user can already see it. Do not repeat or restate its content.",
     "html": "Delivered as the Website.html document in this chat. Do not repeat or restate its contents.",
@@ -66,14 +85,21 @@ DELIVERY_NOTES = {
 
 
 def strip_fence(text: str) -> str:
-    match = re.fullmatch(r"```(?:svg|xml|html)?\s*\n?(.*?)\n?```", text.strip(), re.DOTALL)
+    """Remove one Markdown code fence around the whole output, any language tag."""
+    match = re.fullmatch(r"```[\w+-]*[^\S\n]*\n?(.*?)\n?```", text.strip(), re.DOTALL)
     return match.group(1).strip() if match else text.strip()
 
 
 def validate_svg(source: str) -> None:
-    """Do not let the renderer fetch local files, external images or styles."""
-    if "<!" in source or "@import" in source.lower():
-        raise ValueError("SVG declarations and external styles are not allowed.")
+    """Do not let the renderer fetch local files, external images or styles.
+
+    Comments and CDATA sections are ordinary in generated SVG and harmless;
+    document type and entity declarations are what could pull in files.
+    """
+    if re.search(r"<!\s*(DOCTYPE|ENTITY)", source, re.IGNORECASE):
+        raise ValueError("DOCTYPE and ENTITY declarations are not allowed in SVG.")
+    if "@import" in source.lower():
+        raise ValueError("External styles (@import) are not allowed in SVG.")
     root = ElementTree.fromstring(source)
     if root.tag.split("}")[-1] != "svg":
         raise ValueError("Expected an SVG root element.")
@@ -141,7 +167,9 @@ async def generate_output(kind: str, prompt: str, context, model, *, topic=False
         record_usage(context, workload, response)
         if message_refused(response):
             raise ValueError(message_text(response) or "The model refused the request.")
-        source = strip_fence(strip_internal_envelope(message_text(response)))
+        text = strip_internal_envelope(message_text(response))
+        # The poll parser handles its own fences (```json included).
+        source = text.strip() if kind == "poll" else strip_fence(text)
         if not source:
             raise ValueError("The model returned an empty response.")
         if len(source) > context.settings.tool_result_max_chars // 2:
@@ -149,11 +177,11 @@ async def generate_output(kind: str, prompt: str, context, model, *, topic=False
         if kind == "poll":
             parsed = parser.parse(source)
             if topic:
-                parsed = PollContent(question=parsed.title or "Topics", options=parsed.topics)
+                parsed = parsed.as_poll()
             parsed.validate_options()
             return GeneratedOutput(kind, parsed.model_dump(), prompt)
         if kind == "html":
-            return GeneratedOutput(kind, {"html": source}, prompt)
+            return GeneratedOutput(kind, {"html": source}, HTML_CAPTION)
         try:
             validate_svg(source)
             from .coding import render_svg_png
@@ -163,7 +191,9 @@ async def generate_output(kind: str, prompt: str, context, model, *, topic=False
         except Exception as error:
             if attempt == 2:
                 raise ValueError("Failed to generate valid SVG snippet.") from error
-            messages.append(HumanMessage(content=f"Invalid SVG: {error}. Return corrected SVG only."))
+            # Show what failed, so the correction has something to correct.
+            messages.append(AIMessage(content=source[:8000]))
+            messages.append(HumanMessage(content=f"That SVG is invalid: {error}. Return the corrected SVG only."))
     raise ValueError("Generation failed")
 
 
@@ -192,6 +222,8 @@ def telegram_references(message) -> dict:
 async def deliver_output(output: GeneratedOutput, update, context) -> dict:
     """One send attempt. A network error can mean Telegram accepted the send."""
     result = {"kind": output.kind, **output.content, "status": "delivery_pending"}
+    # From here a timeout may mean Telegram got it; before, nothing was sent.
+    context.conversation_data["side_effect_started"] = context.conversation_data.get("active_tool_call_id")
     try:
         message = update.effective_message
         if output.kind == "svg":
@@ -199,7 +231,7 @@ async def deliver_output(output: GeneratedOutput, update, context) -> dict:
         elif output.kind == "html":
             sent = await message.reply_document(
                 filename="Website.html",
-                caption=output.caption[:1024],
+                caption=output.caption[:1024] or None,
                 document=BytesIO(output.content["html"].encode("utf-8")),
             )
         else:
@@ -208,9 +240,6 @@ async def deliver_output(output: GeneratedOutput, update, context) -> dict:
                 output.content["options"],
                 is_anonymous=False,
             )
-            track_delivered_poll(sent, update, context)
-        context.remember_sent(sent)
-        result.update(status="delivered", telegram=telegram_references(sent), note=DELIVERY_NOTES[output.kind])
     except asyncio.CancelledError:
         # Persist this before propagating a run-level timeout/cancellation.
         result.update(status="delivery_uncertain", error="Delivery was interrupted; do not automatically resend.")
@@ -234,6 +263,17 @@ async def deliver_output(output: GeneratedOutput, update, context) -> dict:
         message = redact_for_user(str(error), context.settings)
         logger.warning("Telegram %s delivery failed: %s", output.kind, message)
         result.update(status="delivery_failed", error=message)
+    else:
+        # Telegram accepted it. Bookkeeping must never turn that into a
+        # reported failure, which could make the model send it again.
+        result.update(status="delivered", note=DELIVERY_NOTES[output.kind])
+        try:
+            if output.kind == "poll":
+                track_delivered_poll(sent, update, context)
+            context.remember_sent(sent)
+            result["telegram"] = telegram_references(sent)
+        except Exception:
+            logger.exception("Recording a delivered %s failed", output.kind)
     return result
 
 
@@ -278,6 +318,7 @@ def builtin_tools(update, context, model, *, topic=False) -> list[AgentTool]:
                 },
                 invoke,
                 context.settings.tool_timeout,
+                marks_side_effects=True,
             )
         )
     tools.append(reaction_tool(update, context))

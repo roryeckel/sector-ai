@@ -85,7 +85,8 @@ async def test_html_cmd_sends_html_document(make_context, make_update):
 
     _, kwargs = update.message.calls_to("reply_document")[0]
     assert kwargs["filename"] == "Website.html"
-    assert kwargs["caption"] == "a page"
+    # Never the request as a caption: in the agent path the model writes it.
+    assert kwargs["caption"] is None
     assert isinstance(kwargs["document"], BytesIO)
     assert kwargs["document"].getvalue() == b"<html><body>hi</body></html>"
 

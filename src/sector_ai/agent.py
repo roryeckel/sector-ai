@@ -127,7 +127,13 @@ async def _run_turn(
 ) -> None:
     async with context.conversation_lock:
         await context.remove_pending_placeholder()
-        for key in ("active_tool_call_id", "started_tool_call_ids", "interrupted_delivery"):
+        for key in (
+            "active_tool_call_id",
+            "started_tool_call_ids",
+            "interrupted_delivery",
+            "side_effect_started",
+            "marked_tool_call_ids",
+        ):
             context.conversation_data.pop(key, None)
         model = context.bot_llm
         context._request_model_name = context.get_model()
@@ -402,9 +408,12 @@ async def _run_turn(
                         # longer cancelled by a newer message.
                         debounce_turns.commit_or_stop(context)
                         context.conversation_data["active_tool_call_id"] = call["id"]
+                        context.conversation_data.pop("side_effect_started", None)
                         started = context.conversation_data.setdefault("started_tool_call_ids", [])
                         if call["id"] not in started:
                             started.append(call["id"])
+                        if tool.marks_side_effects:
+                            context.conversation_data.setdefault("marked_tool_call_ids", []).append(call["id"])
                         try:
                             async with asyncio.timeout(tool.timeout):
                                 result = await tool.invoke(call["args"])
@@ -415,8 +424,16 @@ async def _run_turn(
                         result = {"status": "error", "error": f"Invalid tool arguments: {error.message}"}
                     except TimeoutError:
                         interrupted = context.conversation_data.pop("interrupted_delivery", None)
+                        effect = context.conversation_data.pop("side_effect_started", None)
                         if isinstance(interrupted, dict) and interrupted.get("tool_call_id") == call["id"]:
                             result = interrupted["result"]
+                        elif tool is not None and tool.marks_side_effects and effect != call["id"]:
+                            # Still generating: nothing was sent, so this is an
+                            # ordinary failure, not an uncertain side effect.
+                            result = {
+                                "status": "error",
+                                "error": "Tool timed out before sending anything; nothing was delivered.",
+                            }
                         else:
                             result = {
                                 "status": "execution_uncertain",
@@ -447,6 +464,7 @@ async def _run_turn(
 
         async def finish_node(state):
             context.conversation_data.pop("started_tool_call_ids", None)
+            context.conversation_data.pop("marked_tool_call_ids", None)
             context._enforce_history_cap()
             return {}
 
@@ -564,7 +582,13 @@ def _discard_pending(context, message) -> None:
         if item is message:
             del history[index]
             break
-    for key in ("active_tool_call_id", "started_tool_call_ids", "interrupted_delivery"):
+    for key in (
+        "active_tool_call_id",
+        "started_tool_call_ids",
+        "interrupted_delivery",
+        "side_effect_started",
+        "marked_tool_call_ids",
+    ):
         context.conversation_data.pop(key, None)
 
 
@@ -628,7 +652,13 @@ def _close_pending(context, message):
     history = context.chat_message_history
     start = next((index for index, item in enumerate(history) if item is message), None)
     if start is None:
-        for key in ("active_tool_call_id", "started_tool_call_ids", "interrupted_delivery"):
+        for key in (
+            "active_tool_call_id",
+            "started_tool_call_ids",
+            "interrupted_delivery",
+            "side_effect_started",
+            "marked_tool_call_ids",
+        ):
             context.conversation_data.pop(key, None)
         logger.error("Could not find the interrupted tool transaction in history")
         return
@@ -641,12 +671,20 @@ def _close_pending(context, message):
     if isinstance(interrupted, dict) and not isinstance(interrupted.get("tool_call_id"), str):
         interrupted = None
     started = set(context.conversation_data.pop("started_tool_call_ids", []))
+    marked = set(context.conversation_data.pop("marked_tool_call_ids", []))
+    effect = context.conversation_data.pop("side_effect_started", None)
     context.conversation_data.pop("active_tool_call_id", None)
     for call in message.tool_calls:
         if call["id"] not in completed:
             if interrupted is not None and interrupted["tool_call_id"] == call["id"]:
                 result = interrupted["result"]
                 interrupted = None
+            elif call["id"] in started and call["id"] in marked and effect != call["id"]:
+                result = {
+                    "status": "not_executed",
+                    "error": "Run interrupted while this tool was still generating; nothing was sent. "
+                    "Do not automatically retry.",
+                }
             elif call["id"] in started:
                 result = {
                     "status": "execution_uncertain",

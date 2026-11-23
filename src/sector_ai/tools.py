@@ -29,6 +29,10 @@ class AgentTool:
     parameters: dict
     invoke: Callable[[dict], Awaitable[dict]]
     timeout: float
+    #: The tool sets ``conversation_data["side_effect_started"]`` to the active
+    #: call ID right before its side effect, so a timeout earlier than that is
+    #: known to have changed nothing.
+    marks_side_effects: bool = False
 
     @property
     def schema(self) -> dict:
@@ -64,18 +68,21 @@ def result_content(result: dict, settings) -> str:
     redacted = redact_value(result)
     text = json.dumps(redacted, ensure_ascii=False)
     limit = settings.tool_result_max_chars
-    if len(text) > limit:
-        text = json.dumps(
-            {
-                "status": redacted.get("status", "success"),
-                "truncated": True,
-                "result": text[: limit // 2],
-            },
-            ensure_ascii=False,
-        )
-        # Escaping can expand arbitrary external strings to six characters each.
-        while len(text) > limit:
-            content = json.loads(text)
-            content["result"] = content["result"][: len(content["result"]) // 2]
-            text = json.dumps(content, ensure_ascii=False)
+    if len(text) <= limit:
+        return text
+    # Keep the short fields that say what happened (the delivery note, the
+    # Telegram IDs, the error) intact, and cut only the bulky rest.
+    kept = {key: redacted[key] for key in RECEIPT_KEYS if isinstance(redacted, dict) and key in redacted}
+    if len(json.dumps(kept, ensure_ascii=False)) > limit // 2:
+        kept = {}
+    content = {"status": redacted.get("status", "success"), "truncated": True, **kept, "result": text[: limit // 2]}
+    text = json.dumps(content, ensure_ascii=False)
+    # Escaping can expand arbitrary external strings to six characters each.
+    while len(text) > limit and content["result"]:
+        content["result"] = content["result"][: len(content["result"]) // 2]
+        text = json.dumps(content, ensure_ascii=False)
     return text
+
+
+#: Receipt fields that survive truncation of a long tool result.
+RECEIPT_KEYS = ("kind", "telegram", "note", "error", "target", "emoji", "message_id")

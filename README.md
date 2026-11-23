@@ -136,6 +136,7 @@ This project uses the `python-telegram-bot` library, with various command handle
 ### Generate Fake Website Based on Specification (`/html`)
 - **Description**: Renders a mock HTML website based on given specifications or details from the user.
 - **Usage**: `/html [specification]` (where `[specification]` includes layout and content requirements)
+- **Note**: The page is sent as `Website.html` without restrictions, so it may contain scripts or forms requested by any chat member. Open it like any other attachment from the chat.
 
 ### Generate Horrible SVG Image Based on Description (`/svg`)
 - **Description**: Creates an SVG graphic according to detailed descriptions provided by users, often with humorous or nonsensical results.

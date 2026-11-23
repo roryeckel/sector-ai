@@ -49,6 +49,23 @@ def utf16_len(text: str) -> int:
     return len(text.encode("utf-16-le", "surrogatepass")) // 2
 
 
+def clip_utf16(text: str, limit: int = MESSAGE_LIMIT) -> str:
+    """Cut ``text`` to ``limit`` UTF-16 units without splitting a character.
+
+    A trailing zero-width joiner is dropped too, so an emoji sequence cut in
+    the middle does not end in a dangling joiner.
+    """
+    if utf16_len(text) <= limit:
+        return text
+    used = 0
+    end = 0
+    for end, character in enumerate(text):
+        used += 2 if ord(character) > 0xFFFF else 1
+        if used > limit:
+            break
+    return text[:end].rstrip("‍")
+
+
 def _allowed(entity: RenderedEntity) -> bool:
     if entity.type != "text_link":
         return True

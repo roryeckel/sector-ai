@@ -92,10 +92,9 @@ def is_own_message(context, update, message_id: int) -> bool:
     """Whether the target is a message the bot sent, so its receipt can say so."""
     if message_id in own_message_ids(context):
         return True
+    # By ID, never by is_bot: another bot's message is not this bot's own.
     sender = target_details(context, update, message_id).get("sender") or {}
-    if sender.get("is_bot") is True:
-        return True
-    return sender.get("id") == getattr(context.bot, "id", None)
+    return sender.get("id") is not None and sender.get("id") == getattr(context.bot, "id", None)
 
 
 def resolve_target(context, update, arguments) -> int:

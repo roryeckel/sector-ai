@@ -88,3 +88,64 @@ def test_history_cap_does_not_orphan_tool_results(make_context, make_settings):
     context._enforce_history_cap()
     assert isinstance(context.chat_message_history[0], AIMessage)
     assert context.chat_message_history[0].tool_calls
+
+
+def test_a_truncated_receipt_keeps_its_note_and_ids(make_settings):
+    import json as _json
+
+    from sector_ai.tools import result_content
+
+    settings = make_settings(tool_result_max_chars=2000)
+    result = {
+        "kind": "html",
+        "html": "<p>" + '"x"' * 3000 + "</p>",
+        "status": "delivered",
+        "telegram": {"message_id": 5},
+        "note": "Delivered as the Website.html document in this chat. Do not repeat or restate its contents.",
+    }
+
+    text = result_content(result, settings)
+    content = _json.loads(text)
+
+    assert len(text) <= 2000
+    assert content["truncated"] is True
+    assert content["status"] == "delivered"
+    assert content["telegram"] == {"message_id": 5}
+    assert content["note"] == result["note"]
+
+
+def test_svg_validation_allows_comments_and_cdata_but_not_declarations():
+    import pytest as _pytest
+
+    from sector_ai.capabilities import strip_fence, validate_svg
+
+    validate_svg(
+        '<svg xmlns="http://www.w3.org/2000/svg"><!-- note --><style><![CDATA[rect{fill:red}]]></style>'
+        '<rect width="1" height="1"/></svg>'
+    )
+    for declaration in ("<!DOCTYPE svg>", '<!ENTITY x SYSTEM "file:///etc/passwd">', "<!doctype svg>"):
+        with _pytest.raises(ValueError):
+            validate_svg(declaration + '<svg xmlns="http://www.w3.org/2000/svg"/>')
+    assert strip_fence("```HTML\n<p>x</p>\n```") == "<p>x</p>"
+    assert strip_fence("```\n<svg/>\n```") == "<svg/>"
+
+
+def test_poll_votes_can_name_all_twelve_options():
+    from types import SimpleNamespace
+
+    from sector_ai.poll_tracking import poll_option_snapshot
+
+    poll = SimpleNamespace(options=[SimpleNamespace(text=f"option {n}", voter_count=0) for n in range(12)])
+
+    assert len(poll_option_snapshot(poll)) == 12
+
+
+def test_clip_utf16_counts_emoji_twice_and_never_splits_one():
+    from sector_ai.telegram_format import clip_utf16, utf16_len
+
+    text = "🔥" * 3000
+    clipped = clip_utf16(text, 4096)
+
+    assert utf16_len(clipped) <= 4096
+    assert clipped == "🔥" * 2048
+    assert clip_utf16("👨‍👩", 3) == "👨"

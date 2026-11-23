@@ -259,3 +259,16 @@ def test_builtin_tools_expose_the_reaction_without_text(make_context, make_updat
     assert parameters["properties"]["emoji"]["enum"] == list(ALLOWED_REACTIONS)
     assert parameters["properties"]["target"]["enum"] == ["current", "reply_to"]
     assert "text" not in parameters["properties"]
+
+
+async def test_another_bots_message_is_not_labeled_as_its_own(make_context, make_update):
+    context = make_context()
+    reply = SimpleNamespace(
+        message_id=43, text="beep", from_user=SimpleNamespace(id=777, username="otherbot", is_bot=True)
+    )
+    tool = reaction_tool(make_update(text="react", message_id=77, reply_to_message=reply), context)
+
+    result = await tool.invoke({"emoji": "🔥", "target": "reply_to"})
+
+    assert "own_message" not in result["target"]
+    assert "your own" not in result["note"]

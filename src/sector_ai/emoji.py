@@ -17,6 +17,7 @@ from .chat_metadata import (
 from .history import plain_history, record_content_command
 from .message_text import message_text
 from .sector_context import SectorContext
+from .telegram_format import clip_utf16
 from .typing_indicator import typing
 from .usage import record_usage
 
@@ -116,9 +117,8 @@ async def emoji_cmd(update: Update, context: SectorContext) -> None:
 async def _reply_with_emojis(update: Update, context: SectorContext, messages) -> None:
     message = await context.bind_cache(context.bot_llm, "emoji").ainvoke(messages)
     record_usage(context, "emoji", message)
-    emoji_response = strip_internal_envelope(message_text(message))
-    if len(emoji_response) > MessageLimit.MAX_TEXT_LENGTH:
-        emoji_response = emoji_response[: MessageLimit.MAX_TEXT_LENGTH]
+    # Telegram counts UTF-16 units, so an emoji usually counts twice.
+    emoji_response = clip_utf16(strip_internal_envelope(message_text(message)), MessageLimit.MAX_TEXT_LENGTH)
     logger.info(f"Response: {emoji_response}")
     if emoji_response.strip():
         sent = await update.message.reply_text(emoji_response)

@@ -53,6 +53,8 @@ to, or an explicit message ID in the conversation. The bot may react to its own
 messages when it means to; every message it sends (replies, continuation
 chunks, images, pages, polls) is recorded independently of history, so a
 receipt on one of them is marked `own_message` and says "your own message".
+Ownership is decided by message and sender ID, never by "sent by a bot", so a
+reaction on another bot's message is attributed to that bot.
 That keeps a deliberate self-reaction possible without letting the model later
 deny or misattribute it. Bots may set one reaction per message; custom and
 paid reactions are not supported. The tool does not send text: if the model also
@@ -396,9 +398,32 @@ external servers can accept an operation before a network timeout.
 
 Polls and artifacts are sent once per execution. An uncertain delivery,
 execution timeout, or MCP transport failure blocks additional tools that turn.
+The SVG, HTML and poll tools record the moment their send starts, so a timeout
+while they are still generating is an ordinary failure ("nothing was
+delivered") that blocks nothing; only a timeout after the send started is
+uncertain. Bookkeeping after Telegram accepted a send never turns the receipt
+into a failure. A receipt too long for `SECTOR_AI_TOOL_RESULT_MAX_CHARS` keeps
+its status, delivery note, Telegram IDs and error and truncates only the bulky
+content.
+The model can explain the uncertainty but cannot automatically resend. If a
+multi-tool run is interrupted, an interrupted-delivery receipt is attributed
+only to the tool call that was actually executing; calls that never started are
+recorded as not executed rather than inheriting another tool's result. Native
+SVG generation may repair invalid markup up to three times **before** delivery,
+and each retry shows the model the SVG that failed. External files, images and
+styles are not permitted in SVG rendering: `DOCTYPE`/`ENTITY` declarations,
+`@import`, external `href`/`src` and external `url()` are rejected, while
+comments and CDATA style blocks are fine.
 Reactions are also sent once per execution. Re-setting the same reaction is
 idempotent, so a network failure is retried once; a reaction that cannot be
 confirmed is reported as uncertain rather than delivered.
+
+Generated HTML pages are sent as `Website.html` without a caption and without
+any restriction on what the page does. Any chat member can ask for a page, and
+the page can contain scripts or forms that send data anywhere when someone opens
+the file in a browser. Treat these files like any attachment from a chat
+member.
+
 Once the bot decides to respond (never while it is still deciding whether to),
 the chat shows Telegram's typing indicator until the turn ends. No placeholder
 message is posted: the reply appears with the first visible text, carrying the
@@ -418,12 +443,6 @@ The first send of a reply is retried after a network timeout. Telegram cannot
 say whether a timed-out send arrived, so in rare cases this posts a duplicate
 partial message with a cursor that the bot cannot track. That risk is accepted
 over losing the reply entirely.
-The model can explain the uncertainty but cannot automatically resend. If a
-multi-tool run is interrupted, an interrupted-delivery receipt is attributed
-only to the tool call that was actually executing; calls that never started are
-recorded as not executed rather than inheriting another tool's result. Native
-SVG generation may repair invalid markup up to three times **before** delivery.
-External files/images/styles are not permitted in SVG rendering.
 
 Models whose integration lacks tool binding, or whose endpoint explicitly
 rejects tool calling, fall back to plain chat before any action is performed.

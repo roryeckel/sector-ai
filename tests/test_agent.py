@@ -829,3 +829,59 @@ async def test_a_failed_continuation_never_overwrites_or_deletes_the_delivered_a
     assert context.chat_message_history[-1].content == "x" * 4096
     # Its cursor was replaced, so the next turn must not delete it.
     assert "pending_placeholder" not in context.conversation_data
+
+
+async def test_a_poll_wrapped_in_a_json_fence_is_delivered(agent_context, make_update):
+    fenced = "```json\n" + json.dumps(POLL) + "\n```"
+    context = agent_context(tool_call("create_poll"), AIMessage(content=fenced), AIMessage(content=""))
+    update = make_update(text="/chat poll please")
+
+    await run_agent(update, context, force=True)
+
+    assert update.message.calls_to("reply_poll")[0][0] == (POLL["question"], POLL["options"])
+
+
+async def test_svg_comments_are_allowed_and_a_retry_shows_the_failed_svg(agent_context, make_update):
+    bad = '<svg xmlns="http://www.w3.org/2000/svg"><image href="http://example.com/x.png"/></svg>'
+    commented = SVG.replace("<rect", "<!-- a comment --><rect")
+    context = agent_context(
+        tool_call("generate_svg"), AIMessage(content=bad), AIMessage(content=commented), AIMessage(content="")
+    )
+    update = make_update(text="/chat draw")
+
+    await run_agent(update, context, force=True)
+
+    assert update.message.calls_to("reply_photo")
+    retry = context.bot_llm.received[2]
+    assert any(isinstance(message, AIMessage) and message.content == bad for message in retry)
+
+
+async def test_a_tool_timing_out_before_sending_is_an_ordinary_failure(agent_context, make_update, monkeypatch):
+    async def still_generating(arguments):
+        await asyncio.sleep(10)
+
+    spec = AgentTool("generate_svg", "svg", {"type": "object"}, still_generating, 0.05, marks_side_effects=True)
+    monkeypatch.setattr("sector_ai.agent.builtin_tools", lambda *args, **kwargs: [spec])
+    context = agent_context(tool_call("generate_svg", identifier="svg-1"), AIMessage(content="Sorry."))
+
+    await run_agent(make_update(text="/chat draw"), context, force=True)
+
+    receipt = json.loads(next(m for m in context.chat_message_history if isinstance(m, ToolMessage)).content)
+    assert receipt["status"] == "error"
+    assert "nothing was delivered" in receipt["error"]
+
+
+async def test_a_tool_timing_out_after_its_send_started_stays_uncertain(agent_context, make_update, monkeypatch):
+    context = agent_context(tool_call("generate_svg", identifier="svg-1"), AIMessage(content="Unsure."))
+
+    async def sending(arguments):
+        context.conversation_data["side_effect_started"] = context.conversation_data["active_tool_call_id"]
+        await asyncio.sleep(10)
+
+    spec = AgentTool("generate_svg", "svg", {"type": "object"}, sending, 0.05, marks_side_effects=True)
+    monkeypatch.setattr("sector_ai.agent.builtin_tools", lambda *args, **kwargs: [spec])
+
+    await run_agent(make_update(text="/chat draw"), context, force=True)
+
+    receipt = json.loads(next(m for m in context.chat_message_history if isinstance(m, ToolMessage)).content)
+    assert receipt["status"] == "execution_uncertain"
