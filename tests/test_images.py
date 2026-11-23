@@ -554,3 +554,36 @@ def test_album_ids_are_not_shown_to_the_model(make_context, make_update, make_ph
     entry = context.chat_message_history[0]
     assert entry.additional_kwargs["album_message_ids"] == [10, 11]
     assert "album_message_ids" not in render_metadata(entry).content
+
+
+async def test_a_straggler_photo_keeps_its_place_in_arrival_order(make_context, make_update, make_photo, monkeypatch):
+    calls = []
+
+    async def fake_run_agent(update, context, **kwargs):
+        calls.append(kwargs)
+
+    monkeypatch.setattr("sector_ai.agent.run_agent", fake_run_agent)
+    context = make_context()
+    context.bot_data["flushed_albums"] = {(1, "album-1"): asyncio.get_running_loop().time()}
+    update = album_item(make_update, make_photo, 12, b"late")
+
+    await handle_photo(update, context)
+
+    assert len(calls) == 1
+    assert calls[0]["engage"] is False
+    # It registers a turn, so it waits for earlier turns to store first.
+    assert calls[0]["debounce"] is True
+
+
+async def test_a_redelivered_album_item_is_stored_once(photo_context, make_update, make_photo):
+    context, model = photo_context("One.", album_wait=0.05)
+    tasks = capture_tasks(context)
+    item = album_item(make_update, make_photo, 10, b"one", caption="@testbot look")
+
+    await handle_photo(item, context)
+    await handle_photo(item, context)
+    await asyncio.gather(*tasks)
+
+    users = [message for message in context.chat_message_history if isinstance(message, HumanMessage)]
+    assert len(users) == 1
+    assert len(image_parts(last_user_prompt(model))) == 1

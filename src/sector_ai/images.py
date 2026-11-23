@@ -379,7 +379,11 @@ async def handle_photo(update, context) -> None:
     pending = context.bot_data.setdefault("pending_albums", {})
     album = pending.get(key)
     if album is not None:
-        album["updates"].append(update)
+        # A redelivered item must not be stored (and pictured) twice.
+        if type(getattr(message, "message_id", None)) is not int or all(
+            getattr(item.effective_message, "message_id", None) != message.message_id for item in album["updates"]
+        ):
+            album["updates"].append(update)
         album["last"] = loop.time()
         if album["turn"] is not None and type(getattr(message, "message_id", None)) is int:
             album["turn"].message_ids.add(message.message_id)
@@ -389,9 +393,11 @@ async def handle_photo(update, context) -> None:
     for stale in [item for item, at in flushed.items() if loop.time() - at > ALBUM_STRAGGLER_WINDOW]:
         del flushed[stale]
     if key in flushed:
-        # The album was already answered; a late photo is context, not a new question.
+        # The album was already answered; a late photo is context, not a new
+        # question. It still registers its place, so a turn already waiting
+        # stores first and history keeps arrival order.
         logger.info("A photo arrived after its album was answered; storing it as context")
-        await run_agent(update, context, photos=[message], engage=False)
+        await run_agent(update, context, photos=[message], engage=False, debounce=True)
         return
 
     context.bind_update(update)

@@ -247,12 +247,15 @@ oversized photo (over 10 MB, or an album over 20 MB) or a failed description is
 recorded in the marker, so history never shows an unanswered photo.
 
 Album items arrive as separate updates. The first one starts a
-`SECTOR_AI_ALBUM_WAIT` timer that restarts with each new item, up to 10 seconds
-after the first, and the album is answered as one message holding every photo,
-with the caption-bearing item as the reply target. The album claims its place
+`SECTOR_AI_ALBUM_WAIT` timer that restarts with each new item, and the album is
+answered as one message holding every photo, with the caption-bearing item as
+the reply target. The wait is capped at 10 seconds after the first photo, or at
+the configured wait if that is longer (up to its 30-second maximum): while the
+album waits, later turns in the chat queue behind it. The album claims its place
 in arrival order when its first photo arrives, so a text sent right after it is
 stored after the album and answers both. A photo that arrives after its album
-was answered is stored as context without starting another turn.
+was answered is stored as context without starting another turn, in arrival
+order like any other message. A redelivered album item is stored once.
 
 Image tokens are estimated as `ceil(w/p) * ceil(h/p) + 4` with
 `p = SECTOR_AI_IMAGE_PATCH_PX`, so compaction triggers on time. The exact
