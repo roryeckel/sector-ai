@@ -114,8 +114,8 @@ This project uses the `python-telegram-bot` library, with various command handle
 - **Usage**: `/summarize`
 
 ### Generate Emojis Based on Prompt (`/emoji`)
-- **Description**: Creates emojis based on user input or specific prompts related to emotions or themes relevant to the chat.
-- **Usage**: `/emoji [prompt]` (where `[prompt]` is a description of what kind of emoji you want)
+- **Description**: Creates emojis based on user input, or from the recent conversation when no prompt is given. Recent history is bounded to the context window, oldest messages dropped first.
+- **Usage**: `/emoji [prompt]` (where `[prompt]` is a description of what kind of emoji you want; leave it out to summarize the current conversation)
 
 ### Generate a Poll Based on Question or Prompt (`/poll`)
 - **Description**: Creates a poll with multiple options based on user input, useful for gathering feedback.
