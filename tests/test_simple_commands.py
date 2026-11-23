@@ -2,11 +2,22 @@
 
 from unittest.mock import AsyncMock
 
+import pytest
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from sector_ai.characterize import characterize_cmd
 from sector_ai.summarize import summarize_cmd
 from sector_ai.tokens import tokens_cmd
+
+
+@pytest.fixture
+def admin_context(make_context, make_settings):
+    """A context whose test user is an admin, as /characterize now requires."""
+
+    def make(*contents, **kwargs):
+        return make_context(*contents, settings=make_settings(admin_usernames=["testuser"]), **kwargs)
+
+    return make
 
 
 async def test_summarize_uses_summarization_prompt(make_context, make_update):
@@ -93,8 +104,8 @@ async def test_tokens_reports_count_failures(make_context, make_update, monkeypa
     assert update.message.texts("reply_text") == ["Could not count tokens. Check the logs for details."]
 
 
-async def test_characterize_replaces_system_prompt(make_context, make_update):
-    context = make_context("You are a pirate.")
+async def test_characterize_replaces_system_prompt(admin_context, make_update):
+    context = admin_context("You are a pirate.")
     context.chat_message_history.append(HumanMessage(content="old"))
     update = make_update(text="/characterize a pirate")
 
@@ -105,12 +116,12 @@ async def test_characterize_replaces_system_prompt(make_context, make_update):
     assert context.chat_system_prompt == "You are a pirate."
 
 
-async def test_characterize_handles_content_blocks(make_context, make_update):
+async def test_characterize_handles_content_blocks(admin_context, make_update):
     from langchain_core.language_models import GenericFakeChatModel
     from langchain_core.messages import AIMessage
 
     model = GenericFakeChatModel(messages=iter([AIMessage(content=[{"type": "text", "text": "You are a pirate."}])]))
-    context = make_context(model=model)
+    context = admin_context(model=model)
     update = make_update(text="/characterize a pirate")
 
     await characterize_cmd(update, context)
@@ -118,14 +129,14 @@ async def test_characterize_handles_content_blocks(make_context, make_update):
     assert context.chat_system_prompt == "You are a pirate."
 
 
-async def test_characterize_rejects_a_refusal(make_context, make_update):
+async def test_characterize_rejects_a_refusal(admin_context, make_update):
     from langchain_core.language_models import GenericFakeChatModel
     from langchain_core.messages import AIMessage
 
     model = GenericFakeChatModel(
         messages=iter([AIMessage(content=[{"type": "refusal", "refusal": "I cannot do that."}])])
     )
-    context = make_context(model=model)
+    context = admin_context(model=model)
     context.chat_system_prompt = "original"
     update = make_update(text="/characterize a pirate")
 
@@ -135,12 +146,12 @@ async def test_characterize_rejects_a_refusal(make_context, make_update):
     assert "I cannot do that." in update.message.texts("reply_text")[0]
 
 
-async def test_characterize_rejects_an_empty_response(make_context, make_update):
+async def test_characterize_rejects_an_empty_response(admin_context, make_update):
     from langchain_core.language_models import GenericFakeChatModel
     from langchain_core.messages import AIMessage
 
     model = GenericFakeChatModel(messages=iter([AIMessage(content="")]))
-    context = make_context(model=model)
+    context = admin_context(model=model)
     context.chat_system_prompt = "original"
     update = make_update(text="/characterize a pirate")
 
@@ -150,11 +161,22 @@ async def test_characterize_rejects_an_empty_response(make_context, make_update)
     assert "empty" in update.message.texts("reply_text")[0]
 
 
-async def test_characterize_without_prompt(make_context, make_update):
-    context = make_context("unused")
+async def test_characterize_without_prompt(admin_context, make_update):
+    context = admin_context("unused")
     update = make_update(text="/characterize")
 
     await characterize_cmd(update, context)
 
     assert update.message.texts("reply_text") == ["No prompt provided."]
     assert context.bot_llm.call_count == 0
+
+
+async def test_characterize_is_admin_only(make_context, make_update):
+    context = make_context("You are a pirate.")
+    context.chat_system_prompt = "original prompt"
+    update = make_update(text="/characterize a pirate")
+
+    await characterize_cmd(update, context)
+
+    assert "not authorized" in update.message.last_text().lower()
+    assert context.chat_system_prompt == "original prompt"

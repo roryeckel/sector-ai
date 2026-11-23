@@ -75,6 +75,18 @@ def _positive_int(value: object) -> Optional[int]:
 _VOLATILE_TIME = re.compile(r'"current_time_utc":"[^"]*"')
 
 
+#: Placeholders a stored system prompt may use; everything else is literal.
+PROMPT_PLACEHOLDERS = ("USERNAME", "MAX_LEN")
+
+
+def _escape_prompt_braces(template: str) -> str:
+    """Escape every brace in a stored prompt except the known placeholders."""
+    escaped = template.replace("{", "{{").replace("}", "}}")
+    for field in PROMPT_PLACEHOLDERS:
+        escaped = escaped.replace("{{" + field + "}}", "{" + field + "}")
+    return escaped
+
+
 def _character_tokens(character: str) -> float:
     """A cautious per-character token cost, by script.
 
@@ -1416,7 +1428,11 @@ class SectorContext(CallbackContext):
         )
         if not tool_history:
             included_history = plain_history(included_history)
-        messages = [SystemMessagePromptTemplate.from_template(template=system_prompt)]
+        # The prompt is text a person can edit (/system, /characterize), so its
+        # braces are literal. Only the placeholders every prompt may use stay
+        # active; anything else used to raise "Invalid format specifier" on
+        # every turn until /clear.
+        messages = [SystemMessagePromptTemplate.from_template(template=_escape_prompt_braces(system_prompt))]
         static, dynamic = self.context_metadata_messages()
         if static is not None:
             messages.append(static)

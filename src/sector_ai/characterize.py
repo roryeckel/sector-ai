@@ -3,6 +3,7 @@ import logging
 from langchain_core.prompts import PromptTemplate
 from telegram import Update
 
+from .admin import admin_only
 from .chat_metadata import instruction_messages, strip_internal_envelope, with_context
 from .history import scoped_control
 from .message_text import message_refused, message_text
@@ -13,8 +14,10 @@ from .usage import record_usage
 logger = logging.getLogger(__name__)
 
 
+@admin_only
 @scoped_control
 async def characterize_cmd(update: Update, context: SectorContext) -> None:
+    """Replace this conversation's system prompt. Admin-only: it rewrites the bot's behaviour."""
     system_template_dict = await context.get_system_template_dict()
     template = PromptTemplate(
         template=context.settings.system_prompts.characterizer, input_variables=["input", *system_template_dict.keys()]

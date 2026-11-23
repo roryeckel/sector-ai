@@ -73,8 +73,11 @@ History is shared within a chat/forum topic, not across topics or chats.
 Long replies and their continuation messages stay in the originating forum
 topic. Replies in ordinary supergroups also carry a thread ID, but it names a
 reply chain, not a topic, so it is neither sent back nor used as a conversation
-key. The system prompt (`/system`, `/characterize`) and autoreply mode
-(`/autoreply`) belong to the conversation too, so each forum topic has its own.
+key. The system prompt (`/system` and `/characterize`, both admin-only) and
+autoreply mode (`/autoreply`) belong to the conversation too, so each forum
+topic has its own. A stored prompt is plain text: braces in it are literal
+(only `{USERNAME}` and `{MAX_LEN}` are substituted), so a prompt containing
+JSON or code cannot break every later turn.
 `/clear` resets the current conversation's transcript, summary, tool context
 and system prompt, in that topic only. All history is lost when the process
 exits, as before this uplift.

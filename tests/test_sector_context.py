@@ -1114,3 +1114,17 @@ def test_usage_summary_tolerates_bad_state(make_context):
 
     context.bot_data["usage_stats"] = {("model", "workload"): "not a row"}
     assert context.usage_summary() == []
+
+
+def test_braces_in_a_stored_system_prompt_are_literal(make_context):
+    # /system and /characterize accept free text. A brace used to be read as a
+    # format field, and "Invalid format specifier" failed every later turn.
+    context = make_context()
+    context.chat_system_prompt = 'Reply as JSON like {"answer": 1}. You are {USERNAME}; limit {MAX_LEN}.'
+
+    messages = context.get_templated_messages().format_messages(USERNAME="testbot", MAX_LEN=4096)
+
+    prompt = messages[0].content
+    assert '{"answer": 1}' in prompt
+    assert "You are testbot" in prompt
+    assert "limit 4096" in prompt
