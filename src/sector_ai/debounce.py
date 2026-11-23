@@ -158,6 +158,9 @@ async def take_over(update, context, turn: Turn) -> bool:
     again.
     """
     limit = context.settings.debounce_max_restarts
+    if turn.superseded:
+        # Taken over while it waited (an album collecting its photos).
+        return False
     targets = live_turns(context, turn)
     if limit <= 0 or not targets or max(item.restarts for item in targets) >= limit:
         return False

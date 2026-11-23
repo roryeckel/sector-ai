@@ -294,6 +294,11 @@ class SectorContext(CallbackContext):
         name = sender.get("username") or f"user_{sender.get('id', 'unknown')}"
         label = sender.get("username") or sender.get("display_name") or str(sender.get("id", "unknown"))
         additional_kwargs = {"telegram": message_metadata(message)}
+        album_ids = [item.message_id for item in album or [] if type(getattr(item, "message_id", None)) is int]
+        if len(album_ids) > 1:
+            # Every item of an album, in photo order, so an edit of any of them
+            # (or a reaction target) can be matched to this entry.
+            additional_kwargs["telegram"]["album_message_ids"] = album_ids
         if images:
             additional_kwargs["images"] = images
         return HumanMessage(

@@ -35,6 +35,8 @@ logger = logging.getLogger(__name__)
 MAX_PHOTO_BYTES = 10 * 1024 * 1024
 MAX_ALBUM_BYTES = 20 * 1024 * 1024
 DESCRIPTION_MAX_CHARS = 2000
+#: Describe mode: vision calls one answering turn makes, newest photos first.
+DESCRIBE_MAX_PER_TURN = 4
 # Used when a photo's dimensions are unknown: about a 1280×1280 image.
 UNKNOWN_IMAGE_TOKENS = 2100
 
@@ -161,6 +163,8 @@ def photo_markers(images: list[dict]) -> list[str]:
             lines.append(f"[{label}, {size}: could not be loaded ({image.get('error') or 'unknown error'})]")
         elif image.get("status") == "unavailable":
             lines.append(f"[{label}, {size}: image input is unavailable for this model]")
+        elif image.get("status") == "skipped":
+            lines.append(f"[{label}, {size}: not described; only the newest photos are described]")
         elif image.get("status") == "detached":
             lines.append(f"[{label}, {size}: no longer attached; rely on the earlier conversation about it]")
         elif image.get("data"):
@@ -268,30 +272,51 @@ def detach_images(history: list, keep: int) -> tuple[list, int]:
     return result, detached
 
 
+def _undescribed(image: dict) -> bool:
+    return bool(image.get("data")) and not image.get("description")
+
+
 async def describe_pending_images(context) -> int:
-    """Describe photos still holding pixels when the default model cannot read them."""
+    """Describe photos still holding pixels when the default model cannot read them.
+
+    Runs only in a turn that answers. At most ``DESCRIBE_MAX_PER_TURN`` of the
+    newest photos are described; older ones that arrived while the bot stayed
+    silent drop their pixels and keep a "not described" marker, so a backlog
+    never turns into a long run of vision calls inside one turn.
+    """
     settings = context.settings
     if image_mode(settings) != "describe":
         return 0
+    pending = [
+        (message, position)
+        for message in list(context.chat_message_history)
+        for position, image in enumerate(message_images(message))
+        if _undescribed(image)
+    ]
+    chosen = {(id(message), position) for message, position in pending[-DESCRIBE_MAX_PER_TURN:]}
     described = 0
-    for message in list(context.chat_message_history):
-        images = message_images(message)
-        if not any(image.get("data") and not image.get("description") for image in images):
-            continue
+    changed = False
+    # Newest first: if the turn is cancelled midway, the latest photos are done.
+    messages = list({id(message): message for message, _ in pending}.values())
+    for message in reversed(messages):
         caption = message_text(message)
         updated = []
-        for image in images:
-            if image.get("data") and not image.get("description"):
+        for position, image in enumerate(message_images(message)):
+            if (id(message), position) in chosen:
                 image = await _describe(context, image, caption)
                 described += 1
+            elif _undescribed(image):
+                image = {key: value for key, value in image.items() if key != "data"}
+                image["status"] = "skipped"
             updated.append(image)
+        changed = True
         history = context.chat_message_history
         # Other updates can append while the model runs; replace by identity.
         for index, item in enumerate(history):
             if item is message:
                 history[index] = with_images(message, updated)
                 break
-    if described:
+    if changed:
         context.conversation_data.pop("token_count", None)
     return described
 
@@ -329,8 +354,17 @@ async def _describe(context, image: dict, caption: str) -> dict:
     return {**base, "description": text[:DESCRIPTION_MAX_CHARS], "described_by": settings.vision_model}
 
 
+#: An album is answered at most this long after its first photo, however slowly
+#: the rest arrive.
+ALBUM_MAX_WAIT = 10.0
+#: How long a flushed album's ID is remembered, so a photo arriving after it
+#: joins as context instead of starting a second turn.
+ALBUM_STRAGGLER_WINDOW = 60.0
+
+
 async def handle_photo(update, context) -> None:
     """Route photos into the agent, collecting an album into a single turn."""
+    from . import debounce
     from .agent import run_agent
 
     message = update.effective_message
@@ -339,24 +373,69 @@ async def handle_photo(update, context) -> None:
         await run_agent(update, context, photos=[message], debounce=True)
         return
 
+    loop = asyncio.get_running_loop()
     chat = getattr(getattr(update, "effective_chat", None), "id", None)
     key = (chat, group)
     pending = context.bot_data.setdefault("pending_albums", {})
-    if key in pending:
-        pending[key].append(update)
+    album = pending.get(key)
+    if album is not None:
+        album["updates"].append(update)
+        album["last"] = loop.time()
+        if album["turn"] is not None and type(getattr(message, "message_id", None)) is int:
+            album["turn"].message_ids.add(message.message_id)
         return
-    pending[key] = [update]
+
+    flushed = context.bot_data.setdefault("flushed_albums", {})
+    for stale in [item for item, at in flushed.items() if loop.time() - at > ALBUM_STRAGGLER_WINDOW]:
+        del flushed[stale]
+    if key in flushed:
+        # The album was already answered; a late photo is context, not a new question.
+        logger.info("A photo arrived after its album was answered; storing it as context")
+        await run_agent(update, context, photos=[message], engage=False)
+        return
+
+    context.bind_update(update)
+    # Registered now, not after the wait, so the album keeps its place in
+    # arrival order ahead of any text sent right after it.
+    turn = None
+    if context.settings.debounce_max_restarts > 0:
+        turn = debounce.register(update, context, photos=[message])
+    album = {"updates": [update], "first": loop.time(), "last": loop.time(), "turn": turn}
+    pending[key] = album
 
     async def flush():
-        # Telegram delivers album items as separate updates within moments
-        # of each other; the handler returns so the next ones can arrive.
-        await asyncio.sleep(context.settings.album_wait)
-        updates = pending.pop(key, [update])
-        updates.sort(key=lambda item: _int(getattr(item.effective_message, "message_id", None)))
-        primary = next(
-            (item for item in updates if getattr(item.effective_message, "caption", None)),
-            updates[0],
-        )
-        await run_agent(primary, context, photos=[item.effective_message for item in updates], debounce=True)
+        started = False
+        try:
+            # Telegram delivers album items as separate updates within moments
+            # of each other; each new item restarts the wait, up to a cap.
+            wait = context.settings.album_wait
+            deadline = album["first"] + max(ALBUM_MAX_WAIT, wait)
+            while True:
+                remaining = min(album["last"] + wait, deadline) - loop.time()
+                if remaining <= 0:
+                    break
+                await asyncio.sleep(remaining)
+            pending.pop(key, None)
+            flushed[key] = loop.time()
+            updates = sorted(
+                album["updates"], key=lambda item: _int(getattr(item.effective_message, "message_id", None))
+            )
+            primary = next(
+                (item for item in updates if getattr(item.effective_message, "caption", None)),
+                updates[0],
+            )
+            started = True
+            await run_agent(
+                primary,
+                context,
+                photos=[item.effective_message for item in updates],
+                debounce=True,
+                turn=turn,
+            )
+        finally:
+            if not started:
+                pending.pop(key, None)
+                if turn is not None:
+                    debounce.leave(context, turn)
 
     context.application.create_task(flush(), update=update)

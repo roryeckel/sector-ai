@@ -101,7 +101,13 @@ service messages are recorded as attributed events. They never start agent turns
 on their own, even with autoreply enabled.
 
 Message and channel-post edits are intercepted before command or photo
-dispatch. A caption edit keeps the photos already stored with the message. If the original is retained, its current text/caption is replaced and
+dispatch. Live-location updates, which Telegram sends as a stream of edits, are
+not edits of anything said and are ignored, as is any textless edit of a message
+that was never stored. A caption edit keeps the photos already stored with the
+message; a photo the edit replaced is downloaded again and the event says so. An
+edit of any item of an album matches the album's entry; editing an item other
+than the one holding the caption leaves the entry as is and the event carries
+the item's new text. If the original is retained, its current text/caption is replaced and
 a correction event records its ID, edit time and bounded before/after excerpts.
 If the original has been compacted or was never seen, the event records the
 available updated content without pretending the original is known. Stale edits
@@ -223,14 +229,21 @@ engagement and tools that call a model themselves see only these markers.
 In native mode the largest Telegram rendition no larger than
 `SECTOR_AI_IMAGE_MAX_SIDE` is downloaded once and stored as base64. The same
 bytes are re-sent on every turn, which keeps a prefix-caching server's cached
-prompt valid. Describe mode describes a photo the first time a reply needs it;
-photos nobody asked about cost nothing until then. A failed download, an
+prompt valid. Describe mode describes photos only in a turn that answers, and
+at most the newest four per turn; photos nobody asked about cost nothing until
+then. Older undescribed photos (a backlog from while the bot stayed silent)
+drop their pixels and keep a "not described" marker, so one turn never makes a
+long run of vision calls. A failed download, an
 oversized photo (over 10 MB, or an album over 20 MB) or a failed description is
 recorded in the marker, so history never shows an unanswered photo.
 
 Album items arrive as separate updates. The first one starts a
-`SECTOR_AI_ALBUM_WAIT` timer, the rest join it, and the album is answered as one
-message holding every photo, with the caption-bearing item as the reply target.
+`SECTOR_AI_ALBUM_WAIT` timer that restarts with each new item, up to 10 seconds
+after the first, and the album is answered as one message holding every photo,
+with the caption-bearing item as the reply target. The album claims its place
+in arrival order when its first photo arrives, so a text sent right after it is
+stored after the album and answers both. A photo that arrives after its album
+was answered is stored as context without starting another turn.
 
 Image tokens are estimated as `ceil(w/p) * ceil(h/p) + 4` with
 `p = SECTOR_AI_IMAGE_PATCH_PX`, so compaction triggers on time. The exact

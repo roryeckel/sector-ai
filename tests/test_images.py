@@ -1,5 +1,6 @@
 """Photos in the shared transcript: native, describe and placeholder modes."""
 
+import asyncio
 import base64
 import math
 
@@ -56,7 +57,7 @@ def photo_context(make_context, make_settings):
         context = make_context(
             model=model,
             settings=make_settings(
-                context_length=16384, streaming_interval_sec=999, streaming_chunk_size=999999, **settings
+                **{"context_length": 16384, "streaming_interval_sec": 999, "streaming_chunk_size": 999999, **settings}
             ),
         )
         return context, model
@@ -396,3 +397,149 @@ def test_markers_are_pure_text_outside_the_main_prompt():
     assert isinstance(rendered.content, str)
     assert "QUJD" not in rendered.content
     assert "QUJD" not in history_text(message)
+
+
+def album_item(make_update, make_photo, message_id, data, caption=None):
+    update = make_update(
+        text=None,
+        caption=caption,
+        photos=sizes(make_photo, data=data, file_unique_id=f"p{message_id}"),
+        message_id=message_id,
+    )
+    update.message.media_group_id = "album-1"
+    return update
+
+
+def capture_tasks(context):
+    tasks = []
+    context.application.create_task = lambda coroutine, update=None: tasks.append(asyncio.ensure_future(coroutine))
+    return tasks
+
+
+async def test_a_slow_album_photo_restarts_the_wait_instead_of_splitting_the_album(
+    photo_context, make_update, make_photo
+):
+    # A large window keeps three photos below the exact token-count threshold.
+    context, model = photo_context("Three photos.", album_wait=0.5, context_length=131072)
+    tasks = capture_tasks(context)
+    first = album_item(make_update, make_photo, 10, b"one", caption="@testbot compare")
+
+    await handle_photo(first, context)
+    await asyncio.sleep(0.3)
+    await handle_photo(album_item(make_update, make_photo, 11, b"two"), context)
+    # Later than album_wait after the first photo, but not after the last one.
+    await asyncio.sleep(0.3)
+    await handle_photo(album_item(make_update, make_photo, 12, b"three"), context)
+    await asyncio.gather(*tasks)
+
+    assert len(tasks) == 1
+    assert len(model.received) == 1
+    assert first.message.texts("reply_text") == ["Three photos."]
+    assert len(image_parts(last_user_prompt(model))) == 3
+    users = [message for message in context.chat_message_history if isinstance(message, HumanMessage)]
+    assert len(users) == 1
+
+
+async def test_a_photo_after_its_album_was_answered_is_stored_as_context(photo_context, make_update, make_photo):
+    context, model = photo_context("Two photos.", album_wait=0)
+    tasks = capture_tasks(context)
+    await handle_photo(album_item(make_update, make_photo, 10, b"one", caption="@testbot compare"), context)
+    await handle_photo(album_item(make_update, make_photo, 11, b"two"), context)
+    await asyncio.gather(*tasks)
+
+    await handle_photo(album_item(make_update, make_photo, 12, b"late"), context)
+
+    assert len(model.received) == 1
+    users = [message for message in context.chat_message_history if isinstance(message, HumanMessage)]
+    assert len(users) == 2
+    assert context.conversation_data["ingested_messages"] == [10, 11, 12]
+
+
+async def test_text_sent_right_after_an_album_comes_after_it_and_answers_both(photo_context, make_update, make_photo):
+    from types import SimpleNamespace
+
+    from sector_ai.sector_context import SectorContext
+
+    context, model = photo_context("Both.", album_wait=0.3)
+    tasks = capture_tasks(context)
+    await handle_photo(album_item(make_update, make_photo, 10, b"one"), context)
+    bot_message = SimpleNamespace(message_id=5, text="earlier", from_user=SimpleNamespace(id=42))
+    text = make_update(text="what is in them?", message_id=11, reply_to_message=bot_message)
+
+    await run_agent(text, SectorContext(context.application, chat_id=1, user_id=2), debounce=True)
+    await asyncio.gather(*tasks)
+
+    assert len(model.received) == 1
+    assert text.message.texts("reply_text") == ["Both."]
+    users = [message for message in context.chat_message_history if isinstance(message, HumanMessage)]
+    assert users[0].additional_kwargs["telegram"]["message_id"] == 10
+    assert users[-1].additional_kwargs["telegram"]["message_id"] == 11
+    assert len(image_parts(last_user_prompt(model))) == 0
+    assert any(image_parts(message) for message in model.received[0] if isinstance(message, HumanMessage))
+
+
+async def test_describe_mode_describes_only_the_newest_photos(make_context, make_settings, monkeypatch):
+    from sector_ai import images as images_module
+
+    context = make_context(settings=make_settings(default_model_vision=False, vision_model="eyes"))
+    for number in range(6):
+        context.chat_message_history.append(
+            HumanMessage(
+                content=f"photo {number}",
+                additional_kwargs={"images": [{"id": f"p{number}", "width": 10, "height": 10, "data": "QUJD"}]},
+            )
+        )
+
+    async def describe(context, image, caption):
+        return {**{key: value for key, value in image.items() if key != "data"}, "description": caption}
+
+    monkeypatch.setattr(images_module, "_describe", describe)
+
+    assert await images_module.describe_pending_images(context) == images_module.DESCRIBE_MAX_PER_TURN
+    stored = [message.additional_kwargs["images"][0] for message in context.chat_message_history]
+    assert [image.get("status") for image in stored[:2]] == ["skipped", "skipped"]
+    assert all("description" in image for image in stored[2:])
+    assert not any("data" in image for image in stored)
+    assert "not described" in history_text(context.chat_message_history[0])
+
+
+async def test_editing_a_later_album_photo_matches_the_album(make_context, make_update, make_photo):
+    context = make_context()
+    first = make_update(text=None, caption="album caption", photos=[make_photo(file_unique_id="a")], message_id=10)
+    second = make_update(text=None, photos=[make_photo(file_unique_id="b")], message_id=11)
+    album = [first.message, second.message]
+    images = [{"id": "a", "width": 1280, "height": 960}, {"id": "b", "width": 1280, "height": 960}]
+    context.save_user_message(first.message, album=album, images=images)
+
+    edited = make_update(
+        text=None, caption="caption on photo two", photos=[make_photo(file_unique_id="b")], message_id=11
+    )
+    edited.edited_message = edited.message
+    edited.message.edit_date = edited.message.date
+    assert await handle_message_edit(edited, context) is True
+
+    entry = context.chat_message_history[0]
+    assert entry.content == "testuser: album caption"
+    assert entry.additional_kwargs["images"] == images
+    event = context.chat_message_history[-1].content
+    assert '"original_in_recent_history": true' in event
+    assert '"album_message_id": 10' in event
+    assert "caption on photo two" in event
+
+
+async def test_a_replaced_photo_is_reloaded(make_context, make_update, make_photo):
+    context = make_context()
+    update = make_update(text=None, caption="look", photos=[make_photo(file_unique_id="old")], message_id=5)
+    context.save_user_message(update.message, images=[{"id": "old", "width": 1280, "height": 960, "data": "QUJD"}])
+
+    edited = make_update(
+        text=None, caption="look", photos=[make_photo(file_unique_id="new", data=b"new")], message_id=5
+    )
+    edited.edited_message = edited.message
+    edited.message.edit_date = edited.message.date
+    await handle_message_edit(edited, context)
+
+    image = context.chat_message_history[0].additional_kwargs["images"][0]
+    assert image["id"] == "new"
+    assert image["data"] == encoded(b"new")
+    assert '"photo_replaced": true' in context.chat_message_history[-1].content

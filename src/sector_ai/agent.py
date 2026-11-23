@@ -160,7 +160,11 @@ async def _run_turn(
                         )
                 include_command = bool(command) or bool(system_prompt)
                 if photos:
-                    images = await load_photos(photos, context.settings)
+                    # A replaced photo is downloaded in its edited version.
+                    early = turn.edits if turn is not None else {}
+                    images = await load_photos(
+                        [early.get(getattr(item, "message_id", None), item) for item in photos], context.settings
+                    )
                 # Read after the last await: an edit that arrived before this
                 # point is stored instead of the original.
                 edits = turn.edits if turn is not None else {}

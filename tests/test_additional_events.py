@@ -427,3 +427,30 @@ async def test_engagement_in_another_topic_sees_bot_permission_event(make_contex
     prompt = "\n".join(item.content for item in context.bot_llm.received[0])
     assert "bot_membership_changed" in prompt
     assert '"status":"member"' in prompt
+
+
+def location_edit(update_id):
+    message = {
+        "message_id": 30,
+        "date": 1795348800,
+        "edit_date": 1795348800 + update_id,
+        "chat": CHAT,
+        "from": USER,
+        "location": {"latitude": 1.0, "longitude": 2.0, "live_period": 3600},
+    }
+    return Update.de_json({"update_id": update_id, "edited_message": message}, None)
+
+
+def test_live_location_updates_never_reach_the_edit_handler():
+    from sector_ai.chat_events import MESSAGE_EDIT_FILTER
+
+    assert not MESSAGE_EDIT_FILTER.check_update(location_edit(900))
+    assert MESSAGE_EDIT_FILTER.check_update(text_update("changed", edited=True))
+
+
+async def test_textless_edits_of_unstored_messages_add_nothing(make_context):
+    context = make_context()
+    for update_id in range(900, 950):
+        assert await handle_message_edit(location_edit(update_id), context) is False
+
+    assert list(context.chat_message_history) == []

@@ -10,12 +10,16 @@ from telegram.ext import filters
 from .chat_metadata import actor_metadata, message_metadata, text_value, utc_now, utc_timestamp
 from .debounce import leave, register, supersede, turn_for_message, unstored_turn_for_message
 from .history import scoped_control
+from .images import load_photos, message_photos, photo_records
 from .poll_tracking import poll_vote_labels
 from .sector_context import SectorContext
 
 logger = logging.getLogger(__name__)
 
-MESSAGE_EDIT_FILTER = filters.UpdateType.EDITED_MESSAGE | filters.UpdateType.EDITED_CHANNEL_POST
+# Live locations arrive as a stream of edits; none of them changes what was said.
+MESSAGE_EDIT_FILTER = (filters.UpdateType.EDITED_MESSAGE | filters.UpdateType.EDITED_CHANNEL_POST) & ~(
+    filters.LOCATION | filters.VENUE
+)
 
 CHAT_EVENT_FILTER = (
     filters.StatusUpdate.NEW_CHAT_MEMBERS
@@ -114,6 +118,16 @@ def edit_changes_message(update, context) -> bool:
     version = _edit_version(update)
     if version is None or context.is_processed(update):
         return False
+    message = update.effective_message
+    if (
+        not version["text"]
+        and not message_photos(message)
+        and message.message_id not in context.conversation_data.get("ingested_messages", [])
+    ):
+        # A textless edit of something never stored (a live location, a
+        # sticker, an inline keyboard) changes nothing the transcript holds.
+        # A stored message that lost its caption still counts.
+        return False
     previous = context.conversation_data.get("message_edits", {}).get(update.effective_message.message_id)
     if previous:
         at, sequence = version["at"], version["sequence"]
@@ -122,6 +136,22 @@ def edit_changes_message(update, context) -> bool:
         if at == previous["at"] and version["digest"] == previous["digest"]:
             return False
     return True
+
+
+async def _replace_changed_photo(context, message, images: list, album_ids: list, message_id: int) -> list:
+    """Reload the photo an edit replaced; a caption-only edit keeps the stored one."""
+    if not images:
+        return images
+    position = album_ids.index(message_id) if message_id in album_ids else 0
+    if position >= len(images):
+        return images
+    fresh = photo_records([message], context.settings.image_max_side)
+    if not fresh or not fresh[0].get("id") or fresh[0].get("id") == images[position].get("id"):
+        return images
+    loaded = await load_photos([message], context.settings)
+    if loaded:
+        images[position] = loaded[0]
+    return images
 
 
 def _record_edit_version(context, message_id: int, version: dict) -> None:
@@ -213,24 +243,39 @@ async def handle_message_edit(update, context) -> bool:
     found = False
     for index, item in enumerate(context.chat_message_history):
         original = item.additional_kwargs.get("telegram", {})
-        if (
-            isinstance(item, HumanMessage)
-            and original.get("kind") != "chat_event"
-            and original.get("message_id") == message_id
-        ):
-            # An edit arriving late must not replace a newer version.
-            if original.get("edited_at", "") > edited_at:
-                return False
-            event["previous_excerpt"] = item.content[:600]
-            images = item.additional_kwargs.get("images")
-            if images:
-                # A caption edit keeps the photos (and any album) already stored.
-                replacement = replacement.model_copy(
-                    update={"additional_kwargs": {**replacement.additional_kwargs, "images": images}}
+        if not isinstance(item, HumanMessage) or original.get("kind") == "chat_event":
+            continue
+        album_ids = original.get("album_message_ids") or []
+        if original.get("message_id") != message_id and message_id not in album_ids:
+            continue
+        # An edit arriving late must not replace a newer version.
+        if original.get("edited_at", "") > edited_at:
+            return False
+        found = True
+        stored = item.additional_kwargs.get("images") or []
+        images = await _replace_changed_photo(context, message, list(stored), album_ids, message_id)
+        if images != stored:
+            event["photo_replaced"] = True
+        if original.get("message_id") != message_id:
+            # Another item of an album: the entry holds the album's caption, so
+            # keep it; the edit event below carries this item's new text.
+            event["album_message_id"] = original.get("message_id")
+            if images != (item.additional_kwargs.get("images") or []):
+                context.chat_message_history[index] = item.model_copy(
+                    update={"additional_kwargs": {**item.additional_kwargs, "images": images}}
                 )
-            context.chat_message_history[index] = replacement
-            found = True
             break
+        event["previous_excerpt"] = item.content[:600]
+        if images:
+            # A caption edit keeps the photos (and any album) already stored.
+            telegram = {**replacement.additional_kwargs.get("telegram", {})}
+            if album_ids:
+                telegram["album_message_ids"] = album_ids
+            replacement = replacement.model_copy(
+                update={"additional_kwargs": {**replacement.additional_kwargs, "telegram": telegram, "images": images}}
+            )
+        context.chat_message_history[index] = replacement
+        break
     event["original_in_recent_history"] = found
     event["new_excerpt" if found else "new_content"] = (text or "[non-text message edited]")[: 600 if found else 4096]
     _record_edit_version(context, message_id, version)
