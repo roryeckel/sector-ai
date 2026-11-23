@@ -47,6 +47,12 @@ async def characterize_cmd(update: Update, context: SectorContext) -> None:
         if not characterization.strip():
             await update.message.reply_text("The model returned an empty response; the system prompt was not changed.")
             return
+        if "SECTOR_AI_INPUT" in characterization:
+            # It echoed the internal placeholder instead of writing a prompt.
+            await update.message.reply_text(
+                "The model echoed an internal placeholder; the system prompt was not changed. Try again."
+            )
+            return
         await update.message.reply_text(f"Update the system prompt to generated characterization:\n{characterization}")
     logger.info(f"Characterization: {characterization}")
     context.clear_history()

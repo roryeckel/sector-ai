@@ -334,3 +334,19 @@ async def test_usage_names_the_model_and_ignores_requests_without_cache_data(mak
     text = update.message.last_text()
     assert f"{context.get_model()} agent:" in text
     assert "no cache data" in text
+
+
+def test_a_template_that_uses_the_input_twice_never_shows_the_marker():
+    # The characterizer repeats {input}; the second occurrence used to reach the
+    # model as the internal marker and came back as "You are SECTOR_AI_INPUT...".
+    template = PromptTemplate.from_template("Role: {input}. Also role: {input}. End.")
+    messages = instruction_messages(
+        template,
+        {"input": "a grumpy pirate"},
+        input_text="a grumpy pirate",
+    )
+
+    text = "\n".join(message.content for message in messages)
+
+    assert "SECTOR_AI_INPUT" not in text
+    assert messages[-1].content == ". Also role: a grumpy pirate. End."

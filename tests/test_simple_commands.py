@@ -180,3 +180,14 @@ async def test_characterize_is_admin_only(make_context, make_update):
 
     assert "not authorized" in update.message.last_text().lower()
     assert context.chat_system_prompt == "original prompt"
+
+
+async def test_characterize_rejects_an_echoed_placeholder(admin_context, make_update):
+    context = admin_context("You are SECTOR_AI_INPUT, a fictionalized pirate.")
+    context.chat_system_prompt = "original prompt"
+    update = make_update(text="/characterize a pirate")
+
+    await characterize_cmd(update, context)
+
+    assert context.chat_system_prompt == "original prompt"
+    assert "placeholder" in update.message.last_text()

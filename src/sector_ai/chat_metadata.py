@@ -206,6 +206,12 @@ def instruction_messages(template, variables, *, input_key="input", input_text):
     """
     text = template.format(**{**variables, input_key: INPUT_SENTINEL})
     prefix, marker, suffix = text.partition(INPUT_SENTINEL)
+    # A template may use the input more than once (the characterizer does).
+    # Only the first placeholder becomes the human message; every later one
+    # must still become the text, never the marker itself, which a model would
+    # happily echo back as part of its answer.
+    prefix = prefix.replace(INPUT_SENTINEL, input_text)
+    suffix = suffix.replace(INPUT_SENTINEL, input_text)
     messages = []
     if prefix.strip():
         messages.append(SystemMessage(content=prefix.strip()))
