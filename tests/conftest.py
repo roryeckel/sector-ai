@@ -75,6 +75,7 @@ def mock_context(sample_settings):
 def mock_update():
     def _factory(text="/cmd", username="testuser"):
         update = MagicMock()
+        update.effective_message = update.message
         update.message.text = text
         update.effective_message.text = text
         update.message.from_user.username = username
@@ -198,6 +199,9 @@ class RecordingMessage:
         self._record("edit_text", (text,), kwargs)
         return self
 
+    async def delete(self):
+        self._record("delete", (), {})
+
     # Assertion helpers
 
     def calls_to(self, name: str) -> list[tuple[tuple, dict]]:
@@ -230,6 +234,8 @@ def make_update(recording_message):
         date=None,
         callback_data=None,
         fail_times=0,
+        message_id=None,
+        thread_id=None,
     ):
         message = recording_message(
             text=text,
@@ -240,6 +246,10 @@ def make_update(recording_message):
             date=date,
             fail_times=fail_times,
         )
+        if message_id is not None:
+            message.message_id = message_id
+        if thread_id is not None:
+            message.message_thread_id = thread_id
         update = SimpleNamespace(
             message=message,
             effective_message=message,
@@ -260,14 +270,26 @@ def make_update(recording_message):
 
 @pytest.fixture
 def make_photo():
-    def _make(file_size=1024, data=b"image-bytes"):
+    def _make(file_size=1024, data=b"image-bytes", width=1280, height=960, file_unique_id="photo-1", fail=False):
+        downloads = []
+
         async def get_file(read_timeout=None, connect_timeout=None):
             async def download_as_bytearray():
+                downloads.append(file_unique_id)
+                if fail:
+                    raise RuntimeError("download broke")
                 return bytearray(data)
 
             return SimpleNamespace(download_as_bytearray=download_as_bytearray)
 
-        return SimpleNamespace(file_size=file_size, get_file=get_file)
+        return SimpleNamespace(
+            file_size=file_size,
+            get_file=get_file,
+            width=width,
+            height=height,
+            file_unique_id=file_unique_id,
+            downloads=downloads,
+        )
 
     return _make
 
@@ -296,6 +318,8 @@ def make_application(settings, model=None, bot_id: int = 42, username: str = "te
             id=bot_id,
             get_me=get_me,
             send_message=AsyncMock(return_value=SimpleNamespace(message_id=0)),
+            delete_message=AsyncMock(),
+            set_message_reaction=AsyncMock(return_value=True),
         ),
     )
 

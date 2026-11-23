@@ -37,6 +37,9 @@ from .prompts import (
 
 LOG_LEVELS = ("CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG")
 LLM_PROVIDERS = ("ollama", "openai")
+PROMPT_CACHE_MODES = ("auto", "off", "openai", "openrouter")
+PROMPT_CACHE_RETENTION = ("", "in_memory", "24h")
+PROMPT_CACHE_TTL = ("", "30m", "12h", "1h")
 
 
 def _split_list(value: object) -> object:
@@ -84,7 +87,22 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("TELEGRAM_BOT_TOKEN", "SECTOR_AI_TELEGRAM_BOT_TOKEN"),
     )
     default_model: str = "llama3.2-vision:11b-instruct-fp16"
-    vision_model: str = "llama3.2-vision:11b-instruct-fp16"
+    # Photos join the normal transcript. When the default model reads images
+    # they are sent inline; otherwise an optional vision model describes them,
+    # and without one the transcript only records a placeholder.
+    default_model_vision: bool = True
+    vision_model: str = ""
+    # Largest Telegram photo rendition to use (longest side, in pixels).
+    image_max_side: int = Field(default=1280, ge=90, le=10000)
+    # Photos from earlier messages kept attached after a compaction.
+    image_history_limit: int = Field(default=4, ge=0, le=100)
+    # Safety cap on attached photos per request (0 = no cap). Exceeding it
+    # detaches older photos down to image_history_limit in one step.
+    image_max_attached: int = Field(default=32, ge=0, le=1000)
+    # Pixels per image token for local estimates; 28 is conservative for Qwen-VL.
+    image_patch_px: int = Field(default=28, ge=8, le=128)
+    # Seconds to wait for the rest of an album before answering it as one turn.
+    album_wait: float = Field(default=1.5, ge=0, le=30)
     default_svg_size: int = Field(default=250, ge=16, le=2048)
 
     admin_usernames: Annotated[list[str], NoDecode] = ["ex0dus"]
@@ -116,6 +134,29 @@ class Settings(BaseSettings):
         default=[],
         validation_alias=AliasChoices("SECTOR_AI_LLM_DISALLOWED_MODELS", "SECTOR_AI_OLLAMA_DISALLOWED_MODELS"),
     )
+
+    # Prompt caching is backend-specific. "auto" applies controls only for
+    # endpoints that are known to accept them; self-hosted compatible servers
+    # keep their own prefix cache and are never sent vendor-only fields.
+    prompt_cache_mode: str = "auto"
+    prompt_cache_key_prefix: str = "sector-ai"
+    prompt_cache_retention: str = ""
+    prompt_cache_ttl: str = ""
+    # Ask OpenAI-compatible endpoints to include token usage in stream chunks.
+    # Off by default because older local servers reject stream_options.
+    stream_usage: bool = False
+
+    # A single bounded tool-calling agent. Explicit commands remain available
+    # when autonomous tools are disabled or unsupported by the selected model.
+    agent_tools_enabled: bool = True
+    agent_max_tool_calls: int = Field(default=6, ge=1, le=30)
+    agent_max_iterations: int = Field(default=8, ge=1, le=40)
+    agent_timeout: float = Field(default=240.0, gt=0)
+    tool_timeout: float = Field(default=90.0, gt=0)
+    tool_result_max_chars: int = Field(default=16000, ge=1024, le=100000)
+    mcp_config: str = ""
+    autoreply_history_messages: int = Field(default=8, ge=0, le=50)
+    autoreply_context_tokens: int = Field(default=1536, ge=256, le=8192)
 
     # Context compaction. A zero context_length means auto-detect from the
     # server, falling back to a conservative default when it advertises none.
@@ -152,6 +193,30 @@ class Settings(BaseSettings):
         if level not in LOG_LEVELS:
             raise ValueError(f"must be one of {', '.join(LOG_LEVELS)}")
         return level
+
+    @field_validator("prompt_cache_mode")
+    @classmethod
+    def _prompt_cache_mode(cls, value: str) -> str:
+        mode = value.strip().lower()
+        if mode not in PROMPT_CACHE_MODES:
+            raise ValueError(f"must be one of {', '.join(PROMPT_CACHE_MODES)}")
+        return mode
+
+    @field_validator("prompt_cache_retention")
+    @classmethod
+    def _prompt_cache_retention(cls, value: str) -> str:
+        retention = value.strip()
+        if retention not in PROMPT_CACHE_RETENTION:
+            raise ValueError(f"must be empty or one of {', '.join(PROMPT_CACHE_RETENTION[1:])}")
+        return retention
+
+    @field_validator("prompt_cache_ttl")
+    @classmethod
+    def _prompt_cache_ttl(cls, value: str) -> str:
+        ttl = value.strip()
+        if ttl not in PROMPT_CACHE_TTL:
+            raise ValueError(f"must be empty or one of {', '.join(PROMPT_CACHE_TTL[1:])}")
+        return ttl
 
     @model_validator(mode="after")
     def _require_token(self) -> "Settings":

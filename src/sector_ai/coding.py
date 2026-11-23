@@ -1,5 +1,5 @@
-import asyncio
 import logging
+import math
 from io import BytesIO
 
 import pypdfium2 as pdfium
@@ -9,8 +9,11 @@ from svglib.svglib import svg2rlg
 from telegram import Update
 from telegram.error import BadRequest
 
+from .chat_metadata import instruction_messages, strip_internal_envelope, with_context
+from .history import record_content_command
 from .message_text import message_refused, message_text
 from .sector_context import SectorContext
+from .usage import record_usage
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +23,8 @@ def render_svg_png(svg: str, size: int) -> BytesIO:
     drawing = svg2rlg(BytesIO(svg.encode("utf-8")))
     if not drawing:
         raise ValueError("Unable to parse SVG")
+    if any(not math.isfinite(value) or value <= 0 or value > 100000 for value in (drawing.width, drawing.height)):
+        raise ValueError("Invalid SVG dimensions")
 
     scale_factor = size / max(drawing.width, drawing.height)
     drawing.scale(scale_factor, scale_factor)
@@ -43,27 +48,39 @@ def render_svg_png(svg: str, size: int) -> BytesIO:
     return png_buffer
 
 
+@record_content_command
 async def code_cmd(update: Update, context: SectorContext) -> None:
     system_template_dict = await context.get_system_template_dict()
     template = PromptTemplate(
         template=context.settings.system_prompts.code, input_variables=["input", *system_template_dict.keys()]
     )
-    chain = template | context.bot_llm
     code_prompt = update.message.text.split(maxsplit=1)
     if len(code_prompt) <= 1:
         await update.message.reply_text("No prompt provided.")
         return
     code_prompt = code_prompt[-1]
     logger.info(f"Code Prompt: {code_prompt}")
+    messages = with_context(
+        instruction_messages(
+            template,
+            {"input": code_prompt, **system_template_dict},
+            input_key="input",
+            input_text=code_prompt,
+        ),
+        context,
+    )
+    model = context.bind_cache(context.bot_llm, "code")
     for i in range(3):
-        message = await chain.ainvoke({"input": code_prompt, **system_template_dict})
+        message = await model.ainvoke(messages)
+        record_usage(context, "code", message)
         if message_refused(message):
             await update.message.reply_text(message_text(message) or "The model refused the request.")
             return
-        code = message_text(message)
+        code = strip_internal_envelope(message_text(message))
         logger.info(f"Code: {code}")
         try:
-            await update.message.reply_markdown_v2(code)
+            sent = await update.message.reply_markdown_v2(code)
+            context.save_assistant_message(code, sent)
             return
         except BadRequest as e:
             logger.exception("Code Error", exc_info=e)
@@ -73,64 +90,18 @@ async def code_cmd(update: Update, context: SectorContext) -> None:
 
 
 async def html_cmd(update: Update, context: SectorContext) -> None:
-    system_template_dict = await context.get_system_template_dict()
-    template = PromptTemplate(
-        template=context.settings.system_prompts.html, input_variables=["input", *system_template_dict.keys()]
-    )
-    chain = template | context.bot_llm
-    html_prompt = update.message.text.split(maxsplit=1)
-    if len(html_prompt) <= 1:
-        await update.message.reply_text("No prompt provided.")
-        return
-    html_prompt = html_prompt[-1]
-    logger.info(f"HTML Prompt: {html_prompt}")
-    for i in range(3):
-        message = await chain.ainvoke({"input": html_prompt, **system_template_dict})
-        if message_refused(message):
-            await update.message.reply_text(message_text(message) or "The model refused the request.")
-            return
-        html = message_text(message)
-        logger.info(f"HTML: {html}")
-        if not html.strip():
-            await update.message.reply_text("The model returned an empty response.")
-            return
-        try:
-            await update.message.reply_document(
-                filename="Website.html", caption=html_prompt, document=BytesIO(html.encode("utf-8"))
-            )
-            return
-        except BadRequest as e:
-            logger.exception("HTML Error", exc_info=e)
-            logger.exception(f"The HTML was: {html}")
-            continue
-    await update.message.reply_text("Failed to generate valid HTML snippet.")
+    await artifact_command(update, context, "html")
 
 
 async def svg_cmd(update: Update, context: SectorContext) -> None:
-    system_template_dict = await context.get_system_template_dict()
-    template = PromptTemplate(
-        template=context.settings.system_prompts.svg, input_variables=["input", *system_template_dict.keys()]
-    )
-    chain = template | context.bot_llm
-    svg_prompt = update.message.text.split(maxsplit=1)
-    if len(svg_prompt) <= 1:
-        await update.message.reply_text("No prompt provided.")
+    await artifact_command(update, context, "svg")
+
+
+async def artifact_command(update, context, command: str) -> None:
+    parts = (update.effective_message.text or "").split(maxsplit=1)
+    if len(parts) < 2:
+        await update.effective_message.reply_text("No prompt provided.")
         return
-    svg_prompt = svg_prompt[-1]
-    logger.info(f"SVG Prompt: {svg_prompt}")
-    for i in range(3):
-        message = await chain.ainvoke({"input": svg_prompt, **system_template_dict})
-        if message_refused(message):
-            await update.message.reply_text(message_text(message) or "The model refused the request.")
-            return
-        svg = message_text(message).strip("```")
-        logger.info(f"SVG: {svg}")
-        try:
-            png_file = await asyncio.to_thread(render_svg_png, svg, context.chat_svg_size)
-            await update.message.reply_photo(photo=png_file)
-            return
-        except Exception as e:
-            logger.exception("SVG Error", exc_info=e)
-            logger.exception(f"The SVG was: {svg}")
-            continue
-    await update.message.reply_text("Failed to generate valid SVG snippet.")
+    from .agent import run_agent
+
+    await run_agent(update, context, command=command, prompt=parts[1])

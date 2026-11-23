@@ -20,7 +20,7 @@ async def test_emoji_prompt_excludes_command_word(make_context, make_update):
 
     await emoji_cmd(update, context)
 
-    sent = context.bot_llm.received[0][0].content
+    sent = "\n".join(message.content for message in context.bot_llm.received[0])
     assert "a big party" in sent
     assert "/emoji" not in sent
 

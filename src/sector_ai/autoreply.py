@@ -10,13 +10,23 @@ logger = logging.getLogger(__name__)
 
 
 async def should_respond(update: Update, context: SectorContext) -> bool | str:
-    if context.save_user_message(update.message) and context.chat_autoreply_mode:
+    """Engagement only: ingestion belongs to the graph, not this decision."""
+    message = update.effective_message
+    text = message.text or getattr(message, "caption", None) or ""
+    if not isinstance(text, str):
+        text = ""
+    photos = getattr(message, "photo", None)
+    has_photo = isinstance(photos, (list, tuple)) and bool(photos)
+    if context.chat_autoreply_mode and (text or has_photo) and not text.startswith("/"):
+        incoming = text or "[photo without a caption]"
         try:
+            context.bind_update(update)
             should_respond = await retry_on_network_error(
                 lambda: make_decision(
-                    context.settings.system_prompts.decide,
+                    context.settings.system_prompts.decide_autoreply,
                     context,
-                    partial_variables={"input": update.effective_message.text},
+                    partial_variables={"input": incoming},
+                    update=update,
                 ),
                 what="Autoreply decision",
             )

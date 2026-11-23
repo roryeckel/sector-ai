@@ -6,11 +6,13 @@ from collections.abc import AsyncIterator
 from telegram import Message, MessageEntity
 from telegram.error import BadRequest, NetworkError
 
+from .chat_metadata import strip_internal_envelope
 from .logging_utils import redact_for_user
 from .message_text import message_text
 from .retry import retry_on_network_error
 from .sector_context import SectorContext
 from .telegram_format import render_chunks, render_preview, telegram_entities
+from .usage import record_usage, usage_details
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +29,12 @@ def _payload_key(text: str, entities: list[MessageEntity] | None) -> tuple:
 
 
 async def handle_streaming_response(
-    context: SectorContext, response_message: Message, stream_generator: AsyncIterator, log_prefix: str
+    context: SectorContext,
+    response_message: Message,
+    stream_generator: AsyncIterator,
+    log_prefix: str,
+    *,
+    allow_empty: bool = False,
 ) -> str:
     response = ""
     buffer = ""
@@ -39,6 +46,7 @@ async def handle_streaming_response(
     finish_reason = None
     paused = False
     entities_ok = True
+    usage_chunk = None
     markdown_enabled = context.settings.markdown
     cursor = context.settings.streaming_cursor or ""
     buffer_lock = asyncio.Lock()
@@ -81,7 +89,7 @@ async def handle_streaming_response(
             if buffer:
                 response += buffer
             buffer = ""
-        text, entities = render_preview(response, enabled=markdown_enabled, cursor=cursor)
+        text, entities = render_preview(strip_internal_envelope(response), enabled=markdown_enabled, cursor=cursor)
         return await edit(text, telegram_entities(entities) if entities_ok else None)
 
     async def deliver_final() -> bool:
@@ -92,7 +100,7 @@ async def handle_streaming_response(
                 response += buffer
             buffer = ""
 
-        chunks = render_chunks(response, enabled=markdown_enabled)
+        chunks = render_chunks(strip_internal_envelope(response), enabled=markdown_enabled)
         if not chunks:
             return True
 
@@ -100,12 +108,14 @@ async def handle_streaming_response(
         if not await edit(text, telegram_entities(entities) if entities_ok else None):
             return False
 
+        thread_id = getattr(response_message, "message_thread_id", None)
         for text, entities in chunks[1:]:
             payload = telegram_entities(entities) if entities_ok else None
+            kwargs = {"chat_id": response_message.chat_id, "text": text, "entities": payload}
+            if type(thread_id) is int:
+                kwargs["message_thread_id"] = thread_id
             sent = await retry_on_network_error(
-                lambda text=text, payload=payload: context.bot.send_message(
-                    chat_id=response_message.chat_id, text=text, entities=payload
-                ),
+                lambda kwargs=kwargs: context.bot.send_message(**kwargs),
                 what="Telegram message",
                 delays=(2.0, 5.0),
             )
@@ -123,6 +133,8 @@ async def handle_streaming_response(
             saw_chunk = True
             metadata = getattr(chunk, "response_metadata", None) or {}
             finish_reason = metadata.get("normalized_finish_reason") or metadata.get("finish_reason") or finish_reason
+            if usage_details(chunk):
+                usage_chunk = chunk
             async with buffer_lock:
                 buffer += message_text(chunk)
 
@@ -142,28 +154,41 @@ async def handle_streaming_response(
             await update_task
 
         delivered = await deliver_final()
+        visible = strip_internal_envelope(response)
 
-        if not response.strip() and (saw_chunk or not ended_with_falsy):
+        if not allow_empty and not visible.strip() and (saw_chunk or not ended_with_falsy):
             if finish_reason == "refusal":
                 await response_message.edit_text("The model refused the request.")
             else:
                 await response_message.edit_text("The model returned an empty response.")
             logger.warning("%s returned no text", log_prefix)
 
-        if not delivered and response.strip():
+        if delivered:
+            # A successful edit replaced the cursor. The turn owner decides
+            # whether to forget the placeholder when the turn itself ends.
+            context.settle_placeholder()
+        elif visible.strip() or not allow_empty:
+            context.mark_placeholder_unsettled()
+
+        if usage_chunk is not None:
+            record_usage(context, log_prefix, usage_chunk)
+
+        if not delivered and visible.strip():
             logger.error("%s could not be delivered; not saving it", log_prefix)
             return ""
 
-        logger.info(f"{log_prefix} Result: {response}")
-        return response
+        logger.info(f"{log_prefix} Result: {visible}")
+        return visible
 
     except NetworkError as e:
         # A delivery failure must not turn into another model call.
+        context.mark_placeholder_unsettled()
         logger.error("%s delivery failed: %s", log_prefix, e)
         return ""
     except Exception as e:
         error_message = f"Error processing {log_prefix.lower()}: {redact_for_user(str(e), context.settings)}"
         await response_message.edit_text(error_message)
+        context.finish_placeholder()
         logger.error(error_message)
         return ""
 

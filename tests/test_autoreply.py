@@ -8,13 +8,14 @@ from sector_ai import autoreply as autoreply_module
 from sector_ai.autoreply import autoreply_cmd, should_respond
 
 
-async def test_should_respond_records_message_and_returns_decision(make_context, make_update, monkeypatch):
+async def test_should_respond_only_decides_without_ingesting(make_context, make_update, monkeypatch):
     monkeypatch.setattr(autoreply_module, "make_decision", AsyncMock(return_value=True))
     context = make_context("unused")
     update = make_update(text="hello there")
 
     assert await should_respond(update, context) is True
-    assert context.chat_message_history[-1].content == "testuser: hello there"
+    assert context.chat_message_history == []
+    assert autoreply_module.make_decision.await_args.args[0] == context.settings.system_prompts.decide_autoreply
 
 
 async def test_should_respond_skips_decision_when_disabled(make_context, make_update, monkeypatch):
@@ -38,8 +39,8 @@ async def test_should_respond_retries_network_errors(make_context, make_update, 
     assert await should_respond(update, context) is True
 
     assert decision.await_count == 2
-    # The user message is recorded once, not once per retry.
-    assert sum(m.content == "testuser: hello there" for m in context.chat_message_history) == 1
+    # Ingestion is the graph's responsibility, not the decision node's.
+    assert context.chat_message_history == []
 
 
 async def test_should_respond_gives_up_after_repeated_network_errors(make_context, make_update, monkeypatch):
@@ -91,3 +92,13 @@ async def test_autoreply_cmd_toggles_both_ways(make_context, make_update):
     await autoreply_cmd(update, context)
     assert context.chat_autoreply_mode is True
     assert "enabled" in update.message.texts("reply_text")[1]
+
+
+async def test_autoreply_prompt_uses_latest_message_not_the_prompt_itself(make_context, make_update):
+    context = make_context('{"result": true}')
+    update = make_update(text="testbot, can you help with the red bicycle?")
+    assert await should_respond(update, context) is True
+    sent = "\n".join(item.content for item in context.bot_llm.received[0])
+    assert "red bicycle" in sent
+    assert "member of a telegram chat" in sent
+    assert "{input}" not in sent

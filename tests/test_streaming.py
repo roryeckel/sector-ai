@@ -191,6 +191,124 @@ async def test_a_long_reply_is_split_across_messages(make_context, recording_mes
     assert len(message.texts("edit_text")[0]) == 4096
     assert context.bot.send_message.await_count == 1
     assert len(context.bot.send_message.await_args.kwargs["text"]) == 904
+    assert "message_thread_id" not in context.bot.send_message.await_args.kwargs
+
+
+async def test_successful_delivery_keeps_tracking_until_the_turn_finishes(
+    make_context, recording_message, quiet_settings
+):
+    context = make_context(settings=quiet_settings)
+    context.conversation_data["pending_placeholder"] = {"chat_id": 1, "message_id": 42}
+    message = recording_message()
+
+    response = await handle_streaming_response(context, message, aiter_chunks(chunks("Hello")), "Chat")
+
+    assert response == "Hello"
+    # A tool loop may run another model call, so a mid-turn edit must not
+    # forget which placeholder belongs to this turn.
+    assert context.conversation_data["pending_placeholder"]["message_id"] == 42
+    assert "placeholder_unsettled" not in context.conversation_data
+
+    context.finish_placeholder()
+    assert "pending_placeholder" not in context.conversation_data
+
+
+async def test_mid_turn_delivery_failure_keeps_the_placeholder_for_the_next_turn(
+    make_context, recording_message, quiet_settings
+):
+    context = make_context(settings=quiet_settings)
+    context.conversation_data["pending_placeholder"] = {"chat_id": 1, "message_id": 42}
+    message = recording_message()
+    await handle_streaming_response(context, message, aiter_chunks(chunks("First")), "Chat")
+    failed = recording_message(fail_times=1)
+
+    response = await handle_streaming_response(context, failed, aiter_chunks(chunks("Second")), "Chat")
+    context.finish_placeholder()
+
+    assert response == ""
+    assert context.conversation_data["pending_placeholder"]["message_id"] == 42
+
+
+async def test_failed_delivery_keeps_pending_placeholder_for_cleanup(make_context, recording_message, quiet_settings):
+    context = make_context(settings=quiet_settings)
+    context.conversation_data["pending_placeholder"] = {"chat_id": 1, "message_id": 42}
+    message = recording_message(fail_times=1)
+
+    response = await handle_streaming_response(context, message, aiter_chunks(chunks("Hello")), "Chat")
+
+    assert response == ""
+    assert context.conversation_data["pending_placeholder"]["message_id"] == 42
+    assert context.conversation_data["placeholder_unsettled"] is True
+
+    context.finish_placeholder()
+    assert context.conversation_data["pending_placeholder"]["message_id"] == 42
+
+
+async def test_remove_pending_placeholder_deletes_the_message(make_context):
+    context = make_context()
+    context.conversation_data["pending_placeholder"] = {"chat_id": 1, "message_id": 42}
+    context.conversation_data["placeholder_unsettled"] = True
+
+    await context.remove_pending_placeholder()
+
+    context.bot.delete_message.assert_awaited_once_with(chat_id=1, message_id=42)
+    assert "pending_placeholder" not in context.conversation_data
+    assert "placeholder_unsettled" not in context.conversation_data
+
+
+async def test_streaming_records_provider_cache_usage(make_context, recording_message, quiet_settings):
+    context = make_context(settings=quiet_settings)
+    message = recording_message()
+    chunk = AIMessageChunk(
+        content="hi",
+        usage_metadata={
+            "input_tokens": 10,
+            "output_tokens": 1,
+            "total_tokens": 11,
+            "input_token_details": {"cache_read": 6},
+        },
+    )
+
+    response = await handle_streaming_response(context, message, aiter_chunks([chunk]), "Chat")
+
+    assert response == "hi"
+    entry = context.bot_data["usage_stats"][("fake-model", "Chat")]
+    assert entry["requests"] == 1
+    assert entry["cache_read"] == 6
+
+
+async def test_leading_telegram_envelope_is_not_delivered(make_context, recording_message, quiet_settings):
+    context = make_context(settings=quiet_settings)
+    message = recording_message()
+    envelope = '[telegram {"message_id":1,"sender":{"is_bot":true}}]\n'
+
+    response = await handle_streaming_response(context, message, aiter_chunks(chunks(envelope, "Hello")), "Chat")
+
+    assert response == "Hello"
+    assert all("[telegram " not in text for text in message.texts("edit_text"))
+
+
+async def test_leading_telegram_envelope_is_hidden_during_preview(make_context, recording_message, fast_settings):
+    context = make_context(settings=fast_settings)
+    message = recording_message()
+    envelope = '[telegram {"message_id":1,"sender":{"is_bot":true}}]\n'
+
+    response = await handle_streaming_response(context, message, aiter_chunks(chunks(envelope, "Hello")), "Chat")
+
+    assert response == "Hello"
+    assert all("[telegram " not in text for text in message.texts("edit_text"))
+
+
+async def test_long_reply_continuations_stay_in_the_originating_topic(make_context, recording_message, quiet_settings):
+    context = make_context(settings=quiet_settings)
+    message = recording_message()
+    message.message_thread_id = 42
+
+    response = await handle_streaming_response(context, message, aiter_chunks(chunks("x" * 5000)), "Chat")
+
+    assert response == "x" * 5000
+    assert context.bot.send_message.await_count == 1
+    assert context.bot.send_message.await_args.kwargs["message_thread_id"] == 42
 
 
 async def test_a_failed_follow_up_message_is_not_saved(make_context, recording_message, quiet_settings, monkeypatch):

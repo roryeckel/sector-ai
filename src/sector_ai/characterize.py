@@ -3,29 +3,42 @@ import logging
 from langchain_core.prompts import PromptTemplate
 from telegram import Update
 
+from .chat_metadata import instruction_messages, strip_internal_envelope, with_context
+from .history import scoped_control
 from .message_text import message_refused, message_text
 from .sector_context import SectorContext
+from .usage import record_usage
 
 logger = logging.getLogger(__name__)
 
 
+@scoped_control
 async def characterize_cmd(update: Update, context: SectorContext) -> None:
     system_template_dict = await context.get_system_template_dict()
     template = PromptTemplate(
         template=context.settings.system_prompts.characterizer, input_variables=["input", *system_template_dict.keys()]
     )
-    chain = template | context.bot_llm
     characterization_prompt = update.message.text.split(maxsplit=1)
     if len(characterization_prompt) <= 1:
         await update.message.reply_text("No prompt provided.")
         return
     characterization_prompt = characterization_prompt[-1]
     logger.info(f"Characterization Prompt: {characterization_prompt}")
-    message = await chain.ainvoke({"input": characterization_prompt, **system_template_dict})
+    messages = with_context(
+        instruction_messages(
+            template,
+            {"input": characterization_prompt, **system_template_dict},
+            input_key="input",
+            input_text=characterization_prompt,
+        ),
+        context,
+    )
+    message = await context.bind_cache(context.bot_llm, "characterize").ainvoke(messages)
+    record_usage(context, "characterize", message)
     if message_refused(message):
         await update.message.reply_text(message_text(message) or "The model refused the request.")
         return
-    characterization = message_text(message)
+    characterization = strip_internal_envelope(message_text(message))
     if not characterization.strip():
         await update.message.reply_text("The model returned an empty response; the system prompt was not changed.")
         return

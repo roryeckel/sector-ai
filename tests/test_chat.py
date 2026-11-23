@@ -81,11 +81,13 @@ async def test_prompt_sent_to_model_has_expected_shape(make_context, make_update
     await handle_chat(update, context)
 
     sent = context.bot_llm.received[0]
-    assert [type(m) for m in sent] == [SystemMessage, HumanMessage]
-    # System prompt first, then the replayed history in order.
+    assert [type(m) for m in sent] == [SystemMessage, SystemMessage, HumanMessage, SystemMessage]
+    # Static instructions first, then retained history, then the snapshot.
     assert "Telegram chatbot" in sent[0].content
-    assert sent[1].name == "alice"
-    assert sent[1].content == "alice: earlier message"
+    assert "observed data" in sent[1].content
+    assert sent[2].name == "alice"
+    assert sent[2].content == "alice: earlier message"
+    assert "current_time_utc" in sent[3].content
 
 
 async def test_handle_chat_reports_setup_failure(make_context, make_update, monkeypatch):
@@ -167,3 +169,11 @@ async def test_chat_cmd_records_user_message(make_context, make_update, quiet_se
     assert isinstance(context.chat_message_history[0], HumanMessage)
     assert context.chat_message_history[0].content == "testuser: tell me a joke"
     assert isinstance(context.chat_message_history[1], AIMessage)
+
+
+async def test_plain_reply_checks_actual_custom_prompt_budget(make_context, make_settings, make_update):
+    context = make_context("unused", settings=make_settings(context_length=2000))
+    update = make_update(text="/chat hi")
+    await handle_chat(update, context, system_prompt="x" * 12000)
+    assert context.bot_llm.call_count == 0
+    assert "context window" in update.message.texts("edit_text")[-1]

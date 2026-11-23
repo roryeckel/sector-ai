@@ -1,8 +1,8 @@
 from telegram import Update
 
-from .chat import handle_chat
+from .agent import run_agent
 from .sector_context import SectorContext
 
 
 async def summarize_cmd(update: Update, context: SectorContext) -> None:
-    await handle_chat(update, context, system_prompt=context.settings.system_prompts.summarization)
+    await run_agent(update, context, force=True, system_prompt=context.settings.system_prompts.summarization)

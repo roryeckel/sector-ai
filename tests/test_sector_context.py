@@ -266,7 +266,18 @@ def test_load_model_uses_the_openai_backend(make_context, make_settings):
         "default_headers": {"X-Test": "yes"},
         "use_responses_api": False,
         "max_retries": 0,
+        "stream_usage": False,
     }
+
+
+def test_load_model_enables_stream_usage_when_requested(make_context, make_settings):
+    settings = make_settings(llm_provider="openai", stream_usage=True)
+    context = make_context("unused", settings=settings)
+
+    with patch("sector_ai.sector_context.ChatOpenAI") as chat_openai:
+        context.load_model("gpt")
+
+    assert chat_openai.call_args.kwargs["stream_usage"] is True
 
 
 def test_load_model_keeps_a_configured_openai_key(make_context, make_settings):

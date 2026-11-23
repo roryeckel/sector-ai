@@ -5,6 +5,7 @@ from functools import wraps
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import BadRequest
 
+from .history import scoped_control
 from .sector_context import SectorContext
 
 logger = logging.getLogger(__name__)
@@ -30,6 +31,7 @@ def admin_only(func):
     return wrapper
 
 
+@scoped_control
 async def clear_cmd(update: Update, context: SectorContext) -> None:
     context.clear_history()
     context.chat_system_prompt = context.settings.system_prompts.default
@@ -37,6 +39,28 @@ async def clear_cmd(update: Update, context: SectorContext) -> None:
 
 
 @admin_only
+@scoped_control
+async def usage_cmd(update: Update, context: SectorContext) -> None:
+    header = (
+        f"Usage for {context.get_model()} via {context.settings.llm_provider} at {context.endpoint_host} "
+        f"(cache {context.cache_backend()}, stream usage {context.settings.stream_usage})"
+    )
+    rows = context.usage_summary()
+    if not rows:
+        await update.message.reply_text(f"{header}\nNo usage recorded yet.")
+        return
+    lines = [header]
+    for row in rows:
+        lines.append(
+            f"{row['workload']}: {row['requests']} requests, {row['input_tokens']} in / "
+            f"{row['output_tokens']} out, cache {row['cache_read']} read / "
+            f"{row['cache_write']} write ({row['hit_rate']:.1f}% hit)"
+        )
+    await update.message.reply_text("\n".join(lines)[:4096])
+
+
+@admin_only
+@scoped_control
 async def compact_cmd(update: Update, context: SectorContext) -> None:
     # The count and the summary are both model/HTTP calls; say something first.
     status = await update.message.reply_text("Compacting...")
@@ -221,6 +245,7 @@ async def temperature_cmd(update: Update, context: SectorContext) -> None:
 
 
 @admin_only
+@scoped_control
 async def system_prompt_cmd(update: Update, context: SectorContext) -> None:
     new_system_prompt = update.message.text.split(maxsplit=1)
     if len(new_system_prompt) > 1:

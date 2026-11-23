@@ -16,6 +16,7 @@ The log level is left alone; the request lines are still useful, only the
 credential is removed.
 """
 
+import json
 import logging
 import re
 from collections.abc import Iterable
@@ -59,6 +60,11 @@ def register_secrets(settings: Settings | None) -> None:
     _REGISTERED_SECRETS.update(settings_secrets(settings))
 
 
+def register_secret_values(values: Iterable[str]) -> None:
+    """Register credentials resolved from trusted MCP environment references."""
+    _REGISTERED_SECRETS.update(value for value in values if value)
+
+
 def redact_secrets(text: str, secrets: Iterable[str]) -> str:
     """Replace token-shaped URLs and any configured secret in ``text``."""
     text = TOKEN_IN_URL.sub("bot<redacted>", text)
@@ -75,9 +81,21 @@ def redact_token(text: str, token: str) -> str:
     return redact_secrets(text, [token])
 
 
-def redact_for_user(text: str, settings: Settings | None) -> str:
+def redact_for_user(text: str, settings: Settings | None, *, json_escaped: bool = False) -> str:
     """Redact configured secrets before showing an error to a chat participant."""
-    return redact_secrets(text, settings_secrets(settings) | _REGISTERED_SECRETS)
+    secrets = settings_secrets(settings) | _REGISTERED_SECRETS
+    if json_escaped:
+        # MCP text blocks may already contain serialized JSON, including JSON
+        # nested in another JSON string. Scrub those representations before
+        # outer result encoding. Bound expansion by the actual input length.
+        pending = set(secrets)
+        while pending:
+            variants = {
+                json.dumps(secret, ensure_ascii=ascii_only)[1:-1] for secret in pending for ascii_only in (True, False)
+            }
+            pending = {value for value in variants if value not in secrets and len(value) <= len(text)}
+            secrets.update(pending)
+    return redact_secrets(text, secrets)
 
 
 class TokenRedactingFormatter(logging.Formatter):

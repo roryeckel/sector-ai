@@ -22,7 +22,13 @@ def test_defaults_match_the_shipped_configuration(make_settings):
     settings = make_settings()
 
     assert settings.default_model == "llama3.2-vision:11b-instruct-fp16"
-    assert settings.vision_model == "llama3.2-vision:11b-instruct-fp16"
+    assert settings.vision_model == ""
+    assert settings.default_model_vision is True
+    assert settings.image_max_side == 1280
+    assert settings.image_history_limit == 4
+    assert settings.image_max_attached == 32
+    assert settings.image_patch_px == 28
+    assert settings.album_wait == 1.5
     assert settings.default_svg_size == 250
     assert settings.admin_usernames == ["ex0dus"]
     assert settings.streaming_cursor == "🦙"

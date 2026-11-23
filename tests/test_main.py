@@ -6,7 +6,14 @@ from unittest.mock import AsyncMock
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
-from telegram.ext import CallbackQueryHandler, CommandHandler, MessageHandler
+from telegram.ext import (
+    CallbackQueryHandler,
+    ChatMemberHandler,
+    CommandHandler,
+    MessageHandler,
+    PollAnswerHandler,
+    PollHandler,
+)
 
 from sector_ai import __main__ as entrypoint
 from sector_ai.__main__ import error_handler, handle_message, start_cmd
@@ -28,6 +35,7 @@ EXPECTED_COMMANDS = {
     "temperature",
     "models",
     "tokens",
+    "usage",
     "compact",
     "autoreply",
 }
@@ -46,7 +54,7 @@ async def test_start_sends_intro(make_context, make_update):
 
 async def test_handle_message_records_reply_to_bot(make_context, make_update, monkeypatch):
     handled = AsyncMock()
-    monkeypatch.setattr(entrypoint, "handle_chat", handled)
+    monkeypatch.setattr("sector_ai.chat.stream_chat", handled)
     context = make_context("unused")
     reply_to_bot = SimpleNamespace(from_user=SimpleNamespace(id=context.bot.id), text="earlier bot reply")
     update = make_update(text="hello again", reply_to_message=reply_to_bot)
@@ -60,7 +68,7 @@ async def test_handle_message_records_reply_to_bot(make_context, make_update, mo
 
 
 async def test_handle_message_does_not_duplicate_known_bot_reply(make_context, make_update, monkeypatch):
-    monkeypatch.setattr(entrypoint, "handle_chat", AsyncMock())
+    monkeypatch.setattr("sector_ai.chat.stream_chat", AsyncMock())
     context = make_context("unused")
     context.chat_message_history.append(AIMessage(content="already here"))
     reply_to_bot = SimpleNamespace(from_user=SimpleNamespace(id=context.bot.id), text="already here")
@@ -73,48 +81,53 @@ async def test_handle_message_does_not_duplicate_known_bot_reply(make_context, m
 
 async def test_handle_message_ignores_replies_to_other_users(make_context, make_update, monkeypatch):
     responded = AsyncMock(return_value=False)
-    monkeypatch.setattr(entrypoint, "should_respond", responded)
-    monkeypatch.setattr(entrypoint, "handle_chat", AsyncMock())
+    monkeypatch.setattr("sector_ai.agent.should_respond", responded)
+    monkeypatch.setattr("sector_ai.chat.stream_chat", AsyncMock())
     context = make_context("unused")
     reply_to_other = SimpleNamespace(from_user=SimpleNamespace(id=999), text="someone else")
     update = make_update(text="hello", reply_to_message=reply_to_other)
 
     await handle_message(update, context)
 
-    entrypoint.handle_chat.assert_not_awaited()
+    assert update.message.calls_to("reply_text") == []
 
 
 async def test_handle_message_answers_fresh_messages(make_context, make_update, monkeypatch):
-    monkeypatch.setattr(entrypoint, "should_respond", AsyncMock(return_value=True))
-    monkeypatch.setattr(entrypoint, "handle_chat", AsyncMock())
+    monkeypatch.setattr("sector_ai.agent.should_respond", AsyncMock(return_value=True))
+    handled = AsyncMock()
+    monkeypatch.setattr("sector_ai.chat.stream_chat", handled)
     context = make_context("unused")
     update = make_update(text="hello")
 
     await handle_message(update, context)
 
-    entrypoint.handle_chat.assert_awaited_once()
+    handled.assert_awaited_once()
 
 
 async def test_handle_message_ignores_stale_messages(make_context, make_update, monkeypatch):
-    monkeypatch.setattr(entrypoint, "should_respond", AsyncMock(return_value=True))
-    monkeypatch.setattr(entrypoint, "handle_chat", AsyncMock())
+    decision = AsyncMock(return_value=True)
+    handled = AsyncMock()
+    monkeypatch.setattr("sector_ai.agent.should_respond", decision)
+    monkeypatch.setattr("sector_ai.chat.stream_chat", handled)
     context = make_context("unused")
     update = make_update(text="hello", date=datetime.now(UTC) - timedelta(minutes=5))
 
     await handle_message(update, context)
 
-    entrypoint.handle_chat.assert_not_awaited()
+    handled.assert_not_awaited()
+    decision.assert_not_awaited()
 
 
 async def test_handle_message_respects_autoreply_decision(make_context, make_update, monkeypatch):
-    monkeypatch.setattr(entrypoint, "should_respond", AsyncMock(return_value=False))
-    monkeypatch.setattr(entrypoint, "handle_chat", AsyncMock())
+    monkeypatch.setattr("sector_ai.agent.should_respond", AsyncMock(return_value=False))
+    handled = AsyncMock()
+    monkeypatch.setattr("sector_ai.chat.stream_chat", handled)
     context = make_context("unused")
     update = make_update(text="hello")
 
     await handle_message(update, context)
 
-    entrypoint.handle_chat.assert_not_awaited()
+    handled.assert_not_awaited()
 
 
 async def test_error_handler_reports_to_message(make_context, make_update):
@@ -172,8 +185,9 @@ class FakeApplication:
     def add_error_handler(self, handler):
         self.error_handler = handler
 
-    def run_polling(self, bootstrap_retries=0):
+    def run_polling(self, bootstrap_retries=0, allowed_updates=None):
         self.polling = True
+        self.allowed_updates = allowed_updates
 
 
 class FakeBuilder:
@@ -185,6 +199,18 @@ class FakeBuilder:
         return self
 
     def context_types(self, context_types):
+        return self
+
+    def connect_timeout(self, timeout):
+        return self
+
+    def read_timeout(self, timeout):
+        return self
+
+    def write_timeout(self, timeout):
+        return self
+
+    def pool_timeout(self, timeout):
         return self
 
     def build(self):
@@ -206,11 +232,58 @@ def test_main_registers_every_command(tmp_path, monkeypatch):
 
     assert commands == EXPECTED_COMMANDS
     assert any(isinstance(handler, CallbackQueryHandler) for handler in application.handlers)
-    assert len([handler for handler in application.handlers if isinstance(handler, MessageHandler)]) == 2
+    assert len([handler for handler in application.handlers if isinstance(handler, MessageHandler)]) == 4
+    assert any(handler.callback is entrypoint.handle_chat_event for handler in application.handlers)
+    assert application.handlers[0].callback is entrypoint.handle_message_edit
+    assert any(isinstance(handler, PollHandler) for handler in application.handlers)
+    assert any(
+        isinstance(handler, PollAnswerHandler) and handler.callback is entrypoint.handle_poll_answer
+        for handler in application.handlers
+    )
+    assert any(isinstance(handler, ChatMemberHandler) for handler in application.handlers)
+    assert {"edited_message", "edited_channel_post", "my_chat_member", "poll", "poll_answer"} <= set(
+        application.allowed_updates
+    )
+    assert not {"chat_member", "message_reaction"} & set(application.allowed_updates)
     assert application.error_handler is error_handler
     assert application.polling is True
     settings = application.bot_data["settings"]
     assert settings.telegram_bot_token.get_secret_value() == "123:abc"
+
+
+async def test_edited_admin_command_is_intercepted_before_command_dispatch(tmp_path, monkeypatch, make_context):
+    from langchain_core.messages import HumanMessage
+    from telegram import Update
+
+    application = FakeApplication()
+    monkeypatch.setattr(entrypoint, "Application", SimpleNamespace(builder=lambda: FakeBuilder(application)))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:abc")
+    entrypoint.main([])
+    update = Update.de_json(
+        {
+            "update_id": 123,
+            "edited_message": {
+                "message_id": 7,
+                "date": 1795348800,
+                "edit_date": 1795348900,
+                "text": "/clear",
+                "entities": [{"type": "bot_command", "offset": 0, "length": 6}],
+                "chat": {"id": 1, "type": "private"},
+                "from": {"id": 99, "is_bot": False, "first_name": "Alice"},
+            },
+        },
+        None,
+    )
+    context = make_context("must not run")
+    context.chat_message_history.append(HumanMessage(content="retain this history"))
+    context.chat_system_prompt = "retain this prompt"
+    first = next(handler for handler in application.handlers if handler.check_update(update))
+    assert first.callback is entrypoint.handle_message_edit
+    await first.callback(update, context)
+    assert context.chat_message_history[0].content == "retain this history"
+    assert context.chat_system_prompt == "retain this prompt"
+    assert context.bot_llm.call_count == 0
 
 
 def test_main_reports_missing_token_without_traceback(tmp_path, monkeypatch, capsys):
