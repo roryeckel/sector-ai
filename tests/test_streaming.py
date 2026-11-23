@@ -76,7 +76,7 @@ async def test_generator_error_is_reported_and_returns_empty(make_context, recor
     response = await handle_streaming_response(context, message, exploding(), "Chat")
 
     assert response == ""
-    assert "Error processing chat: boom" in message.texts("edit_text")[-1]
+    assert message.texts("edit_text")[-1].startswith("Error processing chat: Something went wrong (reference ")
 
 
 async def test_a_failed_intermediate_edit_still_delivers_the_full_answer(
@@ -516,7 +516,7 @@ async def test_an_error_before_any_text_is_posted_as_a_reply(make_context, recor
     response = await handle_streaming_response(context, LazyReply(context, source), exploding(), "Chat")
 
     assert response == ""
-    assert source.texts("reply_text") == ["Error processing chat: boom"]
+    assert source.texts("reply_text")[0].startswith("Error processing chat: Something went wrong (reference ")
 
 
 async def test_pending_update_cancelled_on_error(make_context, recording_message, fast_settings):
@@ -531,7 +531,7 @@ async def test_pending_update_cancelled_on_error(make_context, recording_message
 
     assert response == ""
     # The error message must survive; the pending cursor edit is cancelled.
-    assert message.texts("edit_text")[-1] == "Error processing chat: boom"
+    assert message.texts("edit_text")[-1].startswith("Error processing chat: Something went wrong")
 
 
 async def test_a_notice_after_visible_text_is_posted_separately(make_context, recording_message):

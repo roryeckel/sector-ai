@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import re
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -476,7 +477,10 @@ async def test_an_error_before_any_text_is_sent_as_a_reply(agent_context, make_u
 
     await run_agent(update, context, force=True)
 
-    assert update.message.texts("reply_text") == ["Error processing chat response: summarizer down"]
+    (shown,) = update.message.texts("reply_text")
+    # An unexpected failure shows a reference; its detail stays in the log.
+    assert re.fullmatch(r"Error processing chat response: Something went wrong \(reference [0-9a-f]{6}\)\.", shown)
+    assert "summarizer down" not in shown
     assert update.message.texts("edit_text") == []
 
 

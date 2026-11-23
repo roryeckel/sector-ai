@@ -8,7 +8,7 @@ from telegram.error import BadRequest, NetworkError, TelegramError
 
 from .chat_metadata import strip_internal_envelope
 from .debounce import commit_or_stop
-from .logging_utils import redact_for_user
+from .logging_utils import user_error_text
 from .message_text import message_text
 from .retry import retry_on_network_error
 from .sector_context import SectorContext
@@ -297,7 +297,7 @@ async def handle_streaming_response(
         return "\n".join(delivered_parts)
     except Exception as e:
         reply.failed = True
-        error_message = f"Error processing {log_prefix.lower()}: {redact_for_user(str(e), context.settings)}"
+        error_message = f"Error processing {log_prefix.lower()}: {user_error_text(e, context.settings)}"
         logger.error(error_message)
         if update_task and not update_task.done():
             # A stale preview edit must not land after the final text.

@@ -24,7 +24,7 @@ from .autoreply import should_respond
 from .capabilities import builtin_tools
 from .chat_metadata import is_message_edit, message_metadata, utc_now
 from .images import load_photos
-from .logging_utils import redact_for_user
+from .logging_utils import user_error_text
 from .mcp_tools import MCPRegistry
 from .prompts import AGENT_SYSTEM_PROMPT
 from .streaming_handler import LazyReply, handle_streaming_response
@@ -438,7 +438,7 @@ async def _run_turn(
                                 "error": "Tool execution timed out; a side effect may have occurred. Do not automatically retry.",
                             }
                     except Exception as error:
-                        result = {"status": "error", "error": redact_for_user(str(error), context.settings)}
+                        result = {"status": "error", "error": user_error_text(error, context.settings)}
                     executions[signature] = result
                 delivered = delivered or result.get("status") == "delivered"
                 blocked = blocked or result.get("status") in {"execution_uncertain", "delivery_uncertain"}
@@ -533,7 +533,7 @@ async def _run_turn(
             text = (
                 "Agent execution timed out."
                 if isinstance(error, TimeoutError)
-                else redact_for_user(str(error), context.settings)
+                else user_error_text(error, context.settings)
             )
             if placeholder is not None:
                 # Posted separately when an answer is already on screen.

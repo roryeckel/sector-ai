@@ -40,7 +40,7 @@ from .coding import code_cmd, html_cmd, svg_cmd
 from .decision import decide_cmd
 from .emoji import emoji_cmd
 from .images import handle_photo, image_mode
-from .logging_utils import configure_logging, redact_for_user
+from .logging_utils import configure_logging, user_error_text
 from .mcp_tools import MCPRegistry
 from .poll import poll_cmd
 from .sector_context import SectorContext
@@ -73,19 +73,23 @@ async def handle_message(update: Update, context: SectorContext) -> None:
     await run_agent(update, context, debounce=True)
 
 
+def _authored(message) -> bool:
+    """A message someone wrote, not a service message such as a member join."""
+    return any(getattr(message, attribute, None) for attribute in ("text", "caption", "photo", "document", "sticker"))
+
+
 # Error handler
 async def error_handler(update: Update, context: SectorContext) -> None:
     logger.exception("An error occurred", exc_info=context.error)
-    error_str = str(context.error)
-    settings = context.bot_data.get("settings")
-    if settings is not None:
-        # Backend errors can echo an Authorization header back to the chat.
-        error_str = redact_for_user(error_str, settings)
+    # Details stay in the log: an exception can name internal hosts, URLs or
+    # paths. The chat sees a deliberate refusal's text, or a reference.
+    error_str = user_error_text(context.error, context.bot_data.get("settings"), log_traceback=False)
+    message = getattr(update, "message", None) if update else None
     try:
-        if update and update.message:
-            await update.message.reply_text(error_str)
+        if message is not None and _authored(message):
+            await message.reply_text(error_str)
         elif update and update.callback_query:
-            await update.callback_query.answer(error_str)
+            await update.callback_query.answer(error_str[:200])
     except TelegramError:
         # The original error is already logged. A failed error reply, often
         # flood control, must not raise another uncaught error.

@@ -449,6 +449,13 @@ stays on screen, is not replaced by a fallback such as "empty response", and is
 what history records. Errors after text is visible are posted as a separate
 message instead of overwriting the answer.
 
+When a turn fails, the chat sees the bot's own explanation for deliberate
+refusals (for example "Conversation exceeds the model's context window"), and
+otherwise "Something went wrong (reference a1b2c3)". The full error and
+traceback are logged under that reference, so backend hostnames, URLs and file
+paths never reach the chat. The bot never replies with an error under a service
+message such as a member join.
+
 The first send of a reply is retried after a network timeout. Telegram cannot
 say whether a timed-out send arrived, so in rare cases this posts a duplicate
 partial message with a cursor that the bot cannot track. That risk is accepted

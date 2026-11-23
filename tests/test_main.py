@@ -364,3 +364,26 @@ def test_parser_rejects_unknown_log_level():
         parser.parse_args(["--log-level", "LOUD"])
 
     assert exit_info.value.code == 2
+
+
+async def test_error_handler_hides_internal_details(make_context, make_update):
+    context = make_context()
+    context.error = RuntimeError("connect failed for url 'http://10.0.0.5:11434/api/chat'")
+    update = make_update(text="hello")
+
+    await entrypoint.error_handler(update, context)
+
+    shown = update.message.last_text()
+    assert "10.0.0.5" not in shown
+    assert shown.startswith("Something went wrong (reference ")
+
+
+async def test_error_handler_does_not_reply_under_service_messages(make_context, make_update):
+    context = make_context()
+    context.error = RuntimeError("boom")
+    update = make_update(text=None)
+    update.message.new_chat_members = [object()]
+
+    await entrypoint.error_handler(update, context)
+
+    assert update.message.shown() == []

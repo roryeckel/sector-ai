@@ -19,6 +19,7 @@ credential is removed.
 import json
 import logging
 import re
+import secrets as secrets_module
 from collections.abc import Iterable
 
 from .settings import Settings
@@ -96,6 +97,36 @@ def redact_for_user(text: str, settings: Settings | None, *, json_escaped: bool 
             pending = {value for value in variants if value not in secrets and len(value) <= len(text)}
             secrets.update(pending)
     return redact_secrets(text, secrets)
+
+
+logger = logging.getLogger(__name__)
+
+#: How a failure the chat should not see in detail starts.
+GENERIC_ERROR = "Something went wrong"
+
+
+def user_error_text(error: BaseException, settings: Settings | None, *, log_traceback: bool = True) -> str:
+    """What a chat participant sees for ``error``.
+
+    A plain ``ValueError`` is what this bot raises on purpose to explain a
+    refusal ("exceeds the model's context window"), so its text is shown,
+    redacted. Anything else (a backend, network or library failure) can name
+    internal hosts, URLs or file paths, so the chat gets a short reference and
+    the full error is logged under it.
+    """
+    if isinstance(error, TimeoutError):
+        return "The request timed out."
+    if type(error) is ValueError and str(error).strip():
+        return redact_for_user(str(error), settings)
+    reference = secrets_module.token_hex(3)
+    logger.error(
+        "Error reference %s: %s: %s",
+        reference,
+        type(error).__name__,
+        error,
+        exc_info=error if log_traceback else None,
+    )
+    return f"{GENERIC_ERROR} (reference {reference})."
 
 
 class TokenRedactingFormatter(logging.Formatter):

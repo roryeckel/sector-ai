@@ -4,7 +4,7 @@ import logging
 from telegram import Update
 from telegram.error import NetworkError
 
-from .logging_utils import redact_for_user
+from .logging_utils import user_error_text
 from .sector_context import SectorContext
 from .streaming_handler import LazyReply, handle_streaming_response
 from .typing_indicator import typing
@@ -66,7 +66,7 @@ async def stream_chat(
     except NetworkError:
         raise
     except Exception as e:
-        await response_message.notify(f"Error processing chat response: {redact_for_user(str(e), context.settings)}")
+        await response_message.notify(f"Error processing chat response: {user_error_text(e, context.settings)}")
     finally:
         context.finish_placeholder()
 

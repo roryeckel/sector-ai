@@ -72,7 +72,8 @@ async def test_handle_chat_reports_model_error(make_context, make_update):
 
     await handle_chat(update, context)
 
-    assert "model unavailable" in update.message.shown()[-1]
+    assert "Something went wrong (reference " in update.message.shown()[-1]
+    assert "model unavailable" not in update.message.shown()[-1]
 
 
 async def test_prompt_sent_to_model_has_expected_shape(make_context, make_update, quiet_settings):
@@ -103,7 +104,19 @@ async def test_handle_chat_reports_setup_failure(make_context, make_update, monk
 
     await handle_chat(update, context)
 
-    assert "Error processing chat response: telegram down" in update.message.shown()[-1]
+    assert "Error processing chat response: Something went wrong (reference " in update.message.shown()[-1]
+
+
+async def test_a_deliberate_refusal_is_shown_as_is(make_context, make_update, monkeypatch):
+    context = make_context("unused")
+    monkeypatch.setattr(
+        context, "get_system_template_dict", AsyncMock(side_effect=ValueError("Conversation exceeds the window."))
+    )
+    update = make_update(text="/chat question")
+
+    await handle_chat(update, context)
+
+    assert update.message.shown()[-1] == "Error processing chat response: Conversation exceeds the window."
 
 
 async def test_handle_chat_retries_after_a_network_error(make_context, make_update, quiet_settings, monkeypatch):
