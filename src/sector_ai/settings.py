@@ -39,7 +39,9 @@ LOG_LEVELS = ("CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG")
 LLM_PROVIDERS = ("ollama", "openai")
 PROMPT_CACHE_MODES = ("auto", "off", "openai", "openrouter")
 PROMPT_CACHE_RETENTION = ("", "in_memory", "24h")
-PROMPT_CACHE_TTL = ("", "30m", "12h", "1h")
+# The bot uses Chat Completions, where OpenAI accepts only "30m" (12h is
+# Responses-only and is rejected). "1h" is OpenRouter's Anthropic-style cache.
+PROMPT_CACHE_TTL = ("", "30m", "1h")
 
 
 def _split_list(value: object) -> object:
@@ -220,6 +222,27 @@ class Settings(BaseSettings):
         if ttl not in PROMPT_CACHE_TTL:
             raise ValueError(f"must be empty or one of {', '.join(PROMPT_CACHE_TTL[1:])}")
         return ttl
+
+    @model_validator(mode="after")
+    def _bounded_photo_memory(self) -> "Settings":
+        # Without compaction nothing else ever detaches photos, so every photo
+        # in up to compaction_max_messages messages would stay in memory.
+        if self.image_max_attached == 0 and not self.compaction_enabled:
+            raise ValueError(
+                "SECTOR_AI_IMAGE_MAX_ATTACHED=0 (no cap) needs compaction enabled; "
+                "otherwise attached photos are never released"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _one_openai_cache_lifetime(self) -> "Settings":
+        # OpenAI rejects a request that sets both lifetime fields.
+        if self.prompt_cache_retention and self.prompt_cache_ttl == "30m":
+            raise ValueError(
+                "SECTOR_AI_PROMPT_CACHE_RETENTION and SECTOR_AI_PROMPT_CACHE_TTL=30m cannot both be set; "
+                "OpenAI rejects requests with both. Use TTL for GPT-5.6 and later, retention for earlier models."
+            )
+        return self
 
     @model_validator(mode="after")
     def _require_token(self) -> "Settings":

@@ -50,7 +50,7 @@ async def stream_chat(
                 logger.warning("Telegram network error while preparing a reply (%s); retrying", e)
                 await asyncio.sleep(5.0 * (attempt + 1))
         budget = await context.get_context_budget()
-        if context._estimate_token_count(messages) > budget * 0.9:
+        if await context.prompt_exceeds(context._estimate_token_count(messages), budget):
             raise ValueError("Conversation exceeds the model's context window. Compact or clear context.")
         logger.info("Respond Prompt: %s", messages)
         stream_generator = context.bind_cache(context.bot_llm, "chat").astream(messages)

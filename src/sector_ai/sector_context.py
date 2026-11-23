@@ -1,6 +1,8 @@
 import asyncio
 import json
 import logging
+import math
+import re
 from time import time
 from typing import Optional
 from urllib.parse import urlsplit
@@ -67,17 +69,38 @@ def _positive_int(value: object) -> Optional[int]:
     return None
 
 
-def _estimate_text_tokens(text: str) -> int:
-    """A conservative character-based bound.
+_VOLATILE_TIME = re.compile(r'"current_time_utc":"[^"]*"')
 
-    Non-ASCII scripts and emoji can run to several tokens per character, while
-    ASCII prose stays near four characters per token. Overestimating only costs
-    an exact count; underestimating would let an oversized prompt through.
+
+def _character_tokens(character: str) -> float:
+    """A cautious per-character token cost, by script.
+
+    ASCII prose runs near four characters per token. Alphabetic scripts such as
+    Cyrillic, Greek, Arabic or accented Latin stay at or below one token per
+    character on current tokenizers; CJK and Hangul at about one to one and a
+    half; emoji and other characters outside the Basic Multilingual Plane can
+    take several. Every weight sits above typical rates, so an estimate errs
+    high, but not by the fourfold that would fail ordinary non-English chats.
+    """
+    code = ord(character)
+    if code < 128:
+        return 0.25
+    if code > 0xFFFF or 0x2600 <= code <= 0x27BF:
+        return 3.0
+    if 0x2E80 <= code <= 0x9FFF or 0xAC00 <= code <= 0xD7AF or 0xF900 <= code <= 0xFAFF or 0xFF00 <= code <= 0xFFEF:
+        return 1.5
+    return 1.0
+
+
+def _estimate_text_tokens(text: str) -> int:
+    """A cautious character-based bound; see ``_character_tokens``.
+
+    Overestimating only costs an exact count; underestimating would let an
+    oversized prompt through.
     """
     if not text:
         return 0
-    ascii_chars = sum(1 for character in text if ord(character) < 128)
-    return max(1, ascii_chars // 4 + (len(text) - ascii_chars) * 4)
+    return max(1, math.ceil(sum(_character_tokens(character) for character in text)))
 
 
 def _split_text(text: str, limit: int) -> list[str]:
@@ -86,7 +109,7 @@ def _split_text(text: str, limit: int) -> list[str]:
     start = 0
     tokens = 0.0
     for index, character in enumerate(text):
-        cost = 0.25 if ord(character) < 128 else 4.0
+        cost = _character_tokens(character)
         if tokens + cost > limit and index > start:
             pieces.append(text[start:index])
             start = index
@@ -253,6 +276,9 @@ class SectorContext(CallbackContext):
         present = {
             item.additional_kwargs.get("telegram", {}).get("chat_sequence") for item in self.chat_message_history
         }
+        # Recorded here once, even if compaction has since folded it into the
+        # summary: it must not come back as a "recent" event.
+        present.update(self.conversation_data.get("stored_chat_sequences", []))
         return [
             item
             for item in self.chat_data.get("shared_chat_events", [])
@@ -267,6 +293,9 @@ class SectorContext(CallbackContext):
         events = self.chat_data.setdefault("shared_chat_events", [])
         events.append(message)
         del events[:-16]
+        stored = self.conversation_data.setdefault("stored_chat_sequences", [])
+        stored.append(sequence)
+        del stored[:-16]
         self.chat_message_history.append(message)
         self._enforce_history_cap()
 
@@ -389,28 +418,32 @@ class SectorContext(CallbackContext):
 
     # Chat
 
+    # The system prompt and autoreply mode belong to the conversation, like its
+    # history: each forum topic has its own, and /clear in one topic resets
+    # only that topic.
+
     @property
     def chat_system_prompt(self) -> str:
         try:
-            return self.chat_data["system_prompt"]
+            return self.conversation_data["system_prompt"]
         except KeyError:
             return self.settings.system_prompts.default
 
     @chat_system_prompt.setter
     def chat_system_prompt(self, new_prompt: str) -> None:
-        self.chat_data["system_prompt"] = new_prompt
+        self.conversation_data["system_prompt"] = new_prompt
 
     @property
     def chat_autoreply_mode(self) -> bool:
         try:
-            return self.chat_data["autoreply_mode"]
+            return self.conversation_data["autoreply_mode"]
         except KeyError:
-            self.chat_data["autoreply_mode"] = True
+            self.conversation_data["autoreply_mode"] = True
             return True
 
     @chat_autoreply_mode.setter
     def chat_autoreply_mode(self, mode: bool) -> None:
-        self.chat_data["autoreply_mode"] = mode
+        self.conversation_data["autoreply_mode"] = mode
 
     @property
     def chat_message_history(self) -> list:
@@ -593,6 +626,19 @@ class SectorContext(CallbackContext):
             return "openai"
         return "none"
 
+    def cache_setting_warnings(self) -> list[str]:
+        """Settings that the resolved cache backend will ignore, for a startup log."""
+        backend = self.cache_backend()
+        ttl = self.settings.prompt_cache_ttl
+        warnings = []
+        if ttl == "30m" and backend != "openai":
+            warnings.append(f"SECTOR_AI_PROMPT_CACHE_TTL=30m only applies to OpenAI; the cache backend is {backend}")
+        if ttl == "1h" and backend != "openrouter":
+            warnings.append(f"SECTOR_AI_PROMPT_CACHE_TTL=1h only applies to OpenRouter; the cache backend is {backend}")
+        if self.settings.prompt_cache_retention and backend != "openai":
+            warnings.append(f"SECTOR_AI_PROMPT_CACHE_RETENTION only applies to OpenAI; the cache backend is {backend}")
+        return warnings
+
     def cache_request_options(self, workload: str) -> dict:
         """Request-local cache affinity, never credentials or prompt content."""
         backend = self.cache_backend()
@@ -604,7 +650,7 @@ class SectorContext(CallbackContext):
             options = {"prompt_cache_key": key}
             if self.settings.prompt_cache_retention:
                 options["prompt_cache_retention"] = self.settings.prompt_cache_retention
-            if self.settings.prompt_cache_ttl in {"30m", "12h"}:
+            if self.settings.prompt_cache_ttl == "30m":
                 options["prompt_cache_options"] = {
                     "mode": "implicit",
                     "ttl": self.settings.prompt_cache_ttl,
@@ -635,6 +681,7 @@ class SectorContext(CallbackContext):
                 continue
             input_tokens = entry.get("input_tokens", 0)
             cache_read = entry.get("cache_read", 0)
+            cached_input = entry.get("cache_input_tokens", 0)
             rows.append(
                 {
                     "model": model,
@@ -644,7 +691,8 @@ class SectorContext(CallbackContext):
                     "output_tokens": entry.get("output_tokens", 0),
                     "cache_read": cache_read,
                     "cache_write": entry.get("cache_write", 0),
-                    "hit_rate": (100.0 * cache_read / input_tokens) if input_tokens else 0.0,
+                    # None when no request in this row reported cache data.
+                    "hit_rate": (100.0 * cache_read / cached_input) if cached_input else None,
                 }
             )
         return rows
@@ -924,11 +972,36 @@ class SectorContext(CallbackContext):
         return bool(isinstance(cached, dict) and cached.get("exact"))
 
     def _token_count_fingerprint(self, messages: list[BaseMessage]) -> tuple:
+        # The snapshot's clock changes on every update without changing the
+        # size (the timestamp has a fixed width), so it must not defeat reuse.
         return (
             *self._model_config(self.get_model()),
-            tuple((m.type, getattr(m, "name", None), prompt_history_text(m), image_signature(m)) for m in messages),
+            tuple(
+                (m.type, getattr(m, "name", None), _VOLATILE_TIME.sub("", prompt_history_text(m)), image_signature(m))
+                for m in messages
+            ),
             repr(self.conversation_data.get("tool_schemas", [])),
         )
+
+    async def prompt_exceeds(self, estimate: int, budget: int, ratio: float = 0.9) -> bool:
+        """Whether the current prompt is over ``ratio`` of the window.
+
+        An estimate between the line and the full window is confirmed by an
+        exact count before a turn fails on it, because the estimate
+        deliberately errs high. Above the window it is not: probing an
+        oversized prompt costs a request, and a server that silently truncates
+        (Ollama) would report a count that looks like it fits.
+        """
+        if estimate <= budget * ratio:
+            return False
+        if estimate > budget:
+            return True
+        try:
+            tokens = await self.count_context_tokens()
+        except Exception:
+            logger.warning("Could not confirm the prompt size; using the estimate", exc_info=True)
+            return True
+        return not self.token_count_is_exact or tokens > budget * ratio
 
     async def _count_with_openai_endpoint(self, messages: list[BaseMessage]) -> int | None:
         """Use ``/responses/input_tokens`` when the server has it, which costs nothing."""
@@ -1168,8 +1241,11 @@ class SectorContext(CallbackContext):
                 pieces = _split_text(text, limit)
                 if chunk:
                     return chunk, messages[index:]
-                rest = [HumanMessage(content=piece) for piece in pieces[1:]] + messages[index + 1 :]
-                return [HumanMessage(content=pieces[0])], rest
+                # Keep the speaker: the bot's long text must not be summarized
+                # as if a user wrote it.
+                role = AIMessage if isinstance(message, AIMessage) else HumanMessage
+                rest = [role(content=piece) for piece in pieces[1:]] + messages[index + 1 :]
+                return [role(content=pieces[0])], rest
             if chunk and tokens + size > limit:
                 return chunk, messages[index:]
             chunk.append(message)

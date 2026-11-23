@@ -82,6 +82,10 @@ def record_usage(context, workload: str, message) -> dict | None:
             entry[field] += value
     if "cache_read" in details or "cache_write" in details:
         entry["cache_requests"] += 1
+        # The hit rate's denominator: input only from requests that report
+        # cache use, so a backend without cache fields cannot dilute it.
+        if isinstance(details.get("input_tokens"), int):
+            entry["cache_input_tokens"] = entry.get("cache_input_tokens", 0) + details["input_tokens"]
     entry["last_at"] = time()
     logger.debug("Model usage model=%s workload=%s %s", model, workload, details)
     return details

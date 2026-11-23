@@ -1,5 +1,6 @@
 """Prefix stability, backend cache selection and usage accounting."""
 
+import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.prompts import PromptTemplate
 from langchain_openai import ChatOpenAI
@@ -106,8 +107,16 @@ def test_cache_controls_can_be_forced_or_disabled(make_context, make_settings):
             llm_provider="openai",
             openai_base_url="http://localhost:1234/v1",
             prompt_cache_mode="openai",
-            prompt_cache_retention="24h",
             prompt_cache_ttl="30m",
+        ),
+    )
+    retained = make_context(
+        "unused",
+        settings=make_settings(
+            llm_provider="openai",
+            openai_base_url="http://localhost:1234/v1",
+            prompt_cache_mode="openai",
+            prompt_cache_retention="24h",
         ),
     )
     disabled = make_context(
@@ -120,9 +129,32 @@ def test_cache_controls_can_be_forced_or_disabled(make_context, make_settings):
     )
 
     options = forced.cache_request_options("agent")
-    assert options["prompt_cache_retention"] == "24h"
     assert options["prompt_cache_options"] == {"mode": "implicit", "ttl": "30m"}
+    assert "prompt_cache_retention" not in options
+    options = retained.cache_request_options("agent")
+    assert options["prompt_cache_retention"] == "24h"
+    assert "prompt_cache_options" not in options
     assert disabled.cache_request_options("agent") == {}
+
+
+def test_both_openai_cache_lifetimes_or_a_responses_only_ttl_are_rejected(make_settings):
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="cannot both be set"):
+        make_settings(prompt_cache_retention="24h", prompt_cache_ttl="30m")
+    with pytest.raises(ValidationError):
+        make_settings(prompt_cache_ttl="12h")
+
+
+def test_a_ttl_the_backend_ignores_is_reported(make_context, make_settings):
+    context = make_context(
+        "unused",
+        settings=make_settings(
+            llm_provider="openai", openai_base_url="https://api.openai.com/v1", prompt_cache_ttl="1h"
+        ),
+    )
+
+    assert any("only applies to OpenRouter" in warning for warning in context.cache_setting_warnings())
 
 
 def test_openrouter_can_extend_automatic_cache_lifetime(make_context, make_settings):
@@ -251,3 +283,31 @@ async def test_usage_command_reports_counters_without_prompt_content(make_contex
     assert "agent:" in text
     assert "10 read" in text
     assert "unused" not in text
+
+
+async def test_usage_names_the_model_and_ignores_requests_without_cache_data(make_context, make_update):
+    context = make_context("unused")
+    cached = AIMessage(
+        content="",
+        usage_metadata={
+            "input_tokens": 100,
+            "output_tokens": 1,
+            "total_tokens": 101,
+            "input_token_details": {"cache_read": 50},
+        },
+    )
+    uncached = AIMessage(content="", usage_metadata={"input_tokens": 900, "output_tokens": 1, "total_tokens": 901})
+    record_usage(context, "agent", cached)
+    record_usage(context, "agent", uncached)
+    record_usage(context, "emoji", uncached)
+
+    rows = {row["workload"]: row for row in context.usage_summary()}
+    assert rows["agent"]["hit_rate"] == 50.0
+    assert rows["emoji"]["hit_rate"] is None
+
+    context.settings.admin_usernames.append("testuser")
+    update = make_update(text="/usage")
+    await usage_cmd(update, context)
+    text = update.message.last_text()
+    assert f"{context.get_model()} agent:" in text
+    assert "no cache data" in text

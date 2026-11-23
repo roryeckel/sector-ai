@@ -20,7 +20,10 @@ def admin_only(func):
         ):
             return await func(update, context, *args, **kwargs)
 
-        logger.warning(f"Unauthorized access attempt by user: {update.effective_user.username} in update {update}")
+        user = getattr(update, "effective_user", None)
+        logger.warning(
+            "Unauthorized access attempt by user: %s in update %s", getattr(user, "username", None) or "unknown", update
+        )
         text = "You are not authorized to use this command."
         if update.message is not None:
             await update.message.reply_text(text)
@@ -52,10 +55,11 @@ async def usage_cmd(update: Update, context: SectorContext) -> None:
         return
     lines = [header]
     for row in rows:
+        hit = "no cache data" if row["hit_rate"] is None else f"{row['hit_rate']:.1f}% hit"
         lines.append(
-            f"{row['workload']}: {row['requests']} requests, {row['input_tokens']} in / "
+            f"{row['model']} {row['workload']}: {row['requests']} requests, {row['input_tokens']} in / "
             f"{row['output_tokens']} out, cache {row['cache_read']} read / "
-            f"{row['cache_write']} write ({row['hit_rate']:.1f}% hit)"
+            f"{row['cache_write']} write ({hit})"
         )
     await update.message.reply_text("\n".join(lines)[:4096])
 

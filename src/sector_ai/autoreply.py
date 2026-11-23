@@ -3,6 +3,7 @@ import logging
 from telegram import Update
 
 from .decision import make_decision
+from .history import scoped_control
 from .retry import retry_on_network_error
 from .sector_context import SectorContext
 
@@ -41,7 +42,9 @@ async def should_respond(update: Update, context: SectorContext) -> bool | str:
         return should_respond
 
 
+@scoped_control
 async def autoreply_cmd(update: Update, context: SectorContext) -> None:
+    """Toggle autoreply for this conversation (this forum topic only)."""
     current_mode = context.chat_autoreply_mode
     context.chat_autoreply_mode = not current_mode
     await update.message.reply_text(

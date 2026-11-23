@@ -81,7 +81,7 @@ Photos are ordinary messages in the conversation. They go through the same autor
 - **Describe**: with `SECTOR_AI_DEFAULT_MODEL_VISION=false` and `SECTOR_AI_VISION_MODEL` set, the vision model describes each photo the first time a reply needs it. The description replaces the photo in the user's message, labelled as coming from that model.
 - **Off**: with neither, the conversation records `[photo …: image input is unavailable for this model]` so the model knows a photo was sent.
 
-An album is collected for `SECTOR_AI_ALBUM_WAIT` seconds and answered as one turn. Photos count toward the context window by size (about one token per `SECTOR_AI_IMAGE_PATCH_PX`² pixels), so compaction triggers on time. Compaction keeps `SECTOR_AI_IMAGE_HISTORY_LIMIT` earlier photos attached and turns older ones into text markers; the model's earlier replies about them remain. `SECTOR_AI_IMAGE_MAX_ATTACHED` caps attached photos per request, for servers that limit images per prompt. Tools that call a model themselves, such as `generate_svg`, see the photo marker and the conversation, not the pixels.
+An album is collected until no new photo has arrived for `SECTOR_AI_ALBUM_WAIT` seconds (at most 10 seconds) and answered as one turn. Photos count toward the context window by size (about one token per `SECTOR_AI_IMAGE_PATCH_PX`² pixels), so compaction triggers on time. Compaction keeps `SECTOR_AI_IMAGE_HISTORY_LIMIT` earlier photos attached and turns older ones into text markers; the model's earlier replies about them remain. `SECTOR_AI_IMAGE_MAX_ATTACHED` caps attached photos per request, for servers that limit images per prompt. Tools that call a model themselves, such as `generate_svg`, see the photo marker and the conversation, not the pixels.
 
 ### Agent and tool-aware history
 
@@ -256,7 +256,7 @@ Bot settings come from environment variables, an optional `.env` file in the wor
 | `SECTOR_AI_VISION_MODEL` | *empty* | Only when `SECTOR_AI_DEFAULT_MODEL_VISION=false`: model that describes photos. Empty records a placeholder instead. |
 | `SECTOR_AI_IMAGE_MAX_SIDE` | `1280` | Largest Telegram photo rendition to use, by longest side in pixels. |
 | `SECTOR_AI_IMAGE_HISTORY_LIMIT` | `4` | Earlier photos kept attached after a compaction; the newest photo message always stays whole. |
-| `SECTOR_AI_IMAGE_MAX_ATTACHED` | `32` | Cap on attached photos per request (`0` for none). Exceeding it detaches older photos down to the history limit in one step. |
+| `SECTOR_AI_IMAGE_MAX_ATTACHED` | `32` | Cap on attached photos per request (`0` for none, which requires compaction). Exceeding it detaches older photos down to the history limit in one step. |
 | `SECTOR_AI_IMAGE_PATCH_PX` | `28` | Pixels per image token used by the local token estimate. |
 | `SECTOR_AI_ALBUM_WAIT` | `1.5` | Seconds to collect an album before answering it as one turn. |
 | `SECTOR_AI_DEBOUNCE_MAX_RESTARTS` | `3` | How many times a newer relevant message, or an edit, may restart a turn that has not replied yet (`0` disables debouncing). |
@@ -271,8 +271,8 @@ Bot settings come from environment variables, an optional `.env` file in the wor
 | `SECTOR_AI_LLM_HEADERS` | `{}` | JSON object of extra HTTP headers. `SECTOR_AI_OLLAMA_HEADERS` is also accepted. |
 | `SECTOR_AI_PROMPT_CACHE_MODE` | `auto` | `auto` applies cache affinity only to recognized OpenAI/OpenRouter hosts. `off` disables it; `openai` and `openrouter` force a choice for an OpenAI-compatible provider. |
 | `SECTOR_AI_PROMPT_CACHE_KEY_PREFIX` | `sector-ai` | Stable prefix for request-local cache/session keys. Chat and forum topic IDs are appended. |
-| `SECTOR_AI_PROMPT_CACHE_RETENTION` | *empty* | OpenAI only: `in_memory` or `24h`. |
-| `SECTOR_AI_PROMPT_CACHE_TTL` | *empty* | OpenAI: `30m` or `12h` for `prompt_cache_options`. OpenRouter: `1h` for Anthropic-style automatic caching. |
+| `SECTOR_AI_PROMPT_CACHE_RETENTION` | *empty* | OpenAI only, models before GPT-5.6: `in_memory` or `24h`. Not together with a TTL. |
+| `SECTOR_AI_PROMPT_CACHE_TTL` | *empty* | OpenAI (GPT-5.6+): `30m` for `prompt_cache_options`. OpenRouter: `1h` for Anthropic-style automatic caching. |
 | `SECTOR_AI_STREAM_USAGE` | `false` | Ask OpenAI-compatible servers to include usage in stream chunks. Leave off for older local servers that reject `stream_options`. |
 | `SECTOR_AI_AGENT_TOOLS_ENABLED` | `true` | Let a tool-capable chat model select tools autonomously. Explicit commands remain available when false. |
 | `SECTOR_AI_AUTOREPLY_HISTORY_MESSAGES` | `8` | Maximum recent history messages supplied to the tool-free engagement decision. |

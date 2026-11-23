@@ -359,3 +359,15 @@ async def test_system_prompt_cmd_resets_to_default(make_context, make_update):
     await system_prompt_cmd(update, context)
 
     assert context.chat_system_prompt == context.settings.system_prompts.default
+
+
+async def test_an_admin_command_without_a_user_is_refused_without_crashing(make_context, make_update):
+    from sector_ai.admin import usage_cmd
+
+    context = make_context()
+    update = make_update(text="/usage")
+    update.effective_user = None
+
+    await usage_cmd(update, context)
+
+    assert "not authorized" in update.message.last_text()

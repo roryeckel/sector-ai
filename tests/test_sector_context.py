@@ -897,12 +897,31 @@ async def test_provisional_ollama_capacity_is_refreshed(make_context, monkeypatc
         assert await context.get_context_length() == 4096
 
 
-def test_estimate_is_conservative_for_non_ascii(make_context):
+def test_estimate_is_cautious_by_script_without_failing_ordinary_chats(make_context):
     context = make_context("unused")
 
-    # Each non-ASCII character is treated as four tokens, so an emoji-heavy
-    # prompt is never assumed to fit because of its character count.
-    assert context._estimate_token_count([HumanMessage(content="你" * 100)]) == 400
+    def estimate(text):
+        return context._estimate_token_count([HumanMessage(content=text)])
+
+    # Above typical tokenizer rates for each script, so a prompt is never
+    # assumed to fit because of its character count...
+    assert estimate("你" * 100) == 150
+    assert estimate("🔥" * 100) == 300
+    # ...but not fourfold: a 2,000-character Russian message (about 1-2k real
+    # tokens) fits an 8k window instead of failing the turn.
+    assert estimate("Привет" * 333) == 1998
+    assert estimate("hello " * 100) == 150
+
+
+async def test_an_estimate_just_over_the_line_is_confirmed_by_an_exact_count(make_context, make_settings, monkeypatch):
+    context = make_context("unused", settings=make_settings(context_length=1000))
+    monkeypatch.setattr(context, "count_context_tokens", AsyncMock(return_value=600))
+    context.conversation_data["token_count"] = {"fingerprint": None, "tokens": 600, "exact": True}
+
+    assert await context.prompt_exceeds(950, 1000) is False
+    # Over the whole window, no probe is sent at all.
+    assert await context.prompt_exceeds(1500, 1000) is True
+    assert context.count_context_tokens.await_count == 1
 
 
 async def test_a_transient_context_length_failure_is_not_cached(make_context, make_settings):
@@ -988,3 +1007,54 @@ def test_a_forum_topic_gets_its_own_conversation(make_context, make_update):
     context.bind_update(make_update(text="in a topic", thread_id=77))
 
     assert "marker" not in context.conversation_data
+
+
+def test_the_token_count_cache_survives_a_clock_change(make_context, make_update):
+    context = make_context("unused")
+    context.bind_update(make_update(text="hello"))
+    first = context._token_count_fingerprint(context.context_metadata_messages())
+    context._context_time = "2099-01-01T00:00:00Z"
+
+    assert context._token_count_fingerprint(context.context_metadata_messages()) == first
+
+
+def test_system_prompt_and_autoreply_are_per_topic(make_context, make_update):
+    context = make_context()
+    context.bind_update(make_update(text="main"))
+    context.chat_system_prompt = "main prompt"
+    context.chat_autoreply_mode = False
+
+    context.bind_update(make_update(text="topic", thread_id=22))
+    assert context.chat_system_prompt == context.settings.system_prompts.default
+    assert context.chat_autoreply_mode is True
+    context.chat_system_prompt = "topic prompt"
+
+    context.bind_update(make_update(text="main again"))
+    assert context.chat_system_prompt == "main prompt"
+    assert context.chat_autoreply_mode is False
+
+
+def test_a_compacted_shared_event_does_not_come_back(make_context):
+    context = make_context()
+    context.record_shared_chat_event(HumanMessage(content="bot was promoted", additional_kwargs={"telegram": {}}))
+    # Compaction folds it into the summary.
+    context.chat_message_history = []
+
+    assert context.shared_chat_events() == []
+
+
+def test_a_split_bot_message_keeps_its_speaker_for_the_summary():
+    from sector_ai.sector_context import SectorContext as Context
+
+    chunk, rest = Context._take_summary_chunk([AIMessage(content="x" * 4000)], 200)
+
+    assert isinstance(chunk[0], AIMessage)
+    assert all(isinstance(item, AIMessage) for item in rest)
+
+
+def test_uncapped_photos_need_compaction(make_settings):
+    import pytest as _pytest
+    from pydantic import ValidationError
+
+    with _pytest.raises(ValidationError, match="never released"):
+        make_settings(image_max_attached=0, compaction_enabled=False)

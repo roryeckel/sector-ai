@@ -73,8 +73,15 @@ History is shared within a chat/forum topic, not across topics or chats.
 Long replies and their continuation messages stay in the originating forum
 topic. Replies in ordinary supergroups also carry a thread ID, but it names a
 reply chain, not a topic, so it is neither sent back nor used as a conversation
-key. `/clear` resets the current conversation's transcript, summary, and tool
-context. All history is lost when the process exits, as before this uplift.
+key. The system prompt (`/system`, `/characterize`) and autoreply mode
+(`/autoreply`) belong to the conversation too, so each forum topic has its own.
+`/clear` resets the current conversation's transcript, summary, tool context
+and system prompt, in that topic only. All history is lost when the process
+exits, as before this uplift.
+
+`/usage` lists each model and workload separately. Its cache hit rate counts
+only requests whose backend reported cache use, and says "no cache data" when
+none did.
 
 ## Time, metadata, events, and engagement
 
@@ -285,10 +292,13 @@ Cache affinity is backend-specific:
   accepts those fields.
 - Keys are scoped by chat and forum topic plus workload, so separate
   conversations do not compete for the same routing key.
-- `SECTOR_AI_PROMPT_CACHE_RETENTION` (`in_memory`, `24h`) is OpenAI-only.
-  `SECTOR_AI_PROMPT_CACHE_TTL` accepts `30m` or `12h` for OpenAI and `1h` for
-  OpenRouter's Anthropic-style automatic cache. Empty defaults let the provider
-  choose.
+- `SECTOR_AI_PROMPT_CACHE_RETENTION` (`in_memory`, `24h`) is OpenAI-only and
+  applies to models before GPT-5.6. `SECTOR_AI_PROMPT_CACHE_TTL` accepts `30m`
+  for OpenAI (`prompt_cache_options`, GPT-5.6 and later; the bot uses Chat
+  Completions, where `12h` is not accepted) and `1h` for OpenRouter's
+  Anthropic-style automatic cache. OpenAI rejects a request with both fields,
+  so setting both is a startup error. A value the resolved backend would ignore
+  is logged at startup. Empty defaults let the provider choose.
 - Prompt caching never replaces the correctness rules above. An uncertain side
   effect still blocks further tools, and `compaction` or a message edit may
   legitimately invalidate an earlier prefix.

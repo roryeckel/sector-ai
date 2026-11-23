@@ -293,10 +293,8 @@ async def _run_turn(
             # atomic tool transaction smaller. Fail clearly rather than send
             # an invalid request or let the backend silently truncate it.
             budget = await context.get_context_budget()
-            if (
-                context._estimate_token_count(await context._current_context_messages(), include_tools=True)
-                > budget * 0.9
-            ):
+            estimate = context._estimate_token_count(await context._current_context_messages(), include_tools=True)
+            if await context.prompt_exceeds(estimate, budget):
                 raise ValueError(
                     "Conversation and enabled tools exceed the model's context window. Reduce the tool allowlist or clear context."
                 )

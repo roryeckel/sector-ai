@@ -189,6 +189,8 @@ def main(argv: list[str] | None = None) -> None:
         urlsplit(endpoint).hostname or endpoint,
         settings.prompt_cache_mode,
     )
+    for warning in SectorContext(application).cache_setting_warnings():
+        logger.warning(warning)
     mode = image_mode(settings)
     logger.info(
         "Photos: %s",
