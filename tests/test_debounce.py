@@ -355,3 +355,113 @@ async def test_an_edit_after_the_reply_only_updates_history(chat, make_update, r
     assert len(model.received) == 1
     assert any("message_edited" in str(message.content) for message in first.chat_message_history)
     assert any("hello there" in content for content in humans(first))
+
+
+def edit_update(edited, *, update_id, like):
+    return SimpleNamespace(
+        update_id=update_id,
+        message=None,
+        edited_message=edited,
+        effective_message=edited,
+        effective_user=like.effective_user,
+        effective_chat=like.effective_chat,
+        callback_query=None,
+    )
+
+
+def position(context, text):
+    return next(index for index, content in enumerate(humans(context)) if text in content)
+
+
+async def test_messages_are_stored_in_arrival_order_without_a_takeover(chat, make_update, decision_gates):
+    # A is running. B (another sender) is still being checked. C is judged
+    # irrelevant, so it takes nothing over, yet it must still be stored after B.
+    model, (first, second, third, _) = chat(
+        (AIMessage(content="stale"), asyncio.Event()), (AIMessage(content="answer to A and B"), None)
+    )
+    a = make_update(text="part one", message_id=10)
+    b_text = "part two from someone else"
+    decision_gates[b_text] = asyncio.Event()
+    b = make_update(text=b_text, message_id=11)
+    b.message.from_user.id = 100
+    c = make_update(text="an irrelevant aside", message_id=12)
+    c.message.from_user.id = 101
+
+    task_a = asyncio.create_task(run_agent(a, first, debounce=True))
+    await until(lambda: len(model.received) == 1)
+    task_b = asyncio.create_task(run_agent(b, second, debounce=True))
+    await until(lambda: len(first.conversation_data[debounce.TURNS]) == 2)
+    task_c = asyncio.create_task(run_agent(c, third, debounce=True))
+    await until(lambda: len(first.conversation_data[debounce.TURNS]) == 3)
+    for _ in range(50):
+        await asyncio.sleep(0)
+    decision_gates[b_text].set()
+    await asyncio.gather(task_a, task_b, task_c)
+
+    assert position(first, "part one") < position(first, b_text) < position(first, "an irrelevant aside")
+    assert b.message.texts("reply_text") == ["answer to A and B"]
+
+
+async def test_an_edit_before_the_turn_stores_its_message_is_answered_as_edited(
+    chat, make_update, recording_message, decision_gates
+):
+    # B waits for the lock while A answers. B's text is edited meanwhile: B
+    # must store, decide on and answer the edited text.
+    gate = asyncio.Event()
+    model, (first, second, third, _) = chat(
+        (AIMessage(content="answer to A"), gate), (AIMessage(content="answer to the edit"), None)
+    )
+    a = make_update(text="question A", message_id=10)
+    b = make_update(text="irrelevant v1", message_id=11)
+    b.message.from_user.id = 100
+    edited = recording_message(text="relevant v2", user_id=100)
+    edited.message_id = 11
+
+    task_a = asyncio.create_task(run_agent(a, first, debounce=True))
+    await until(lambda: len(model.received) == 1)
+    task_b = asyncio.create_task(run_agent(b, second, debounce=True))
+    await until(lambda: len(first.conversation_data[debounce.TURNS]) == 2)
+    await handle_edited_message(edit_update(edited, update_id=700, like=b), third)
+    gate.set()
+    await asyncio.gather(task_a, task_b)
+
+    assert any("relevant v2" in content for content in humans(first))
+    assert not any("irrelevant v1" in content for content in humans(first))
+    assert not any("message_edited" in str(item.content) for item in first.chat_message_history)
+    assert "relevant v2" in text_of(model.received[1])
+    assert edited.texts("reply_text") == ["answer to the edit"]
+
+
+async def test_a_redelivered_edit_does_not_restart_the_turn(chat, make_update, recording_message):
+    gate = asyncio.Event()
+    model, (first, second, third, _) = chat(
+        (AIMessage(content="stale"), gate), (AIMessage(content="answer to the edit"), None)
+    )
+    one = make_update(text="capital of Spain?", message_id=10)
+    edited = recording_message(text="capital of Italy?")
+    edited.message_id = 10
+    edit = edit_update(edited, update_id=500, like=one)
+
+    task = asyncio.create_task(run_agent(one, first, debounce=True))
+    await until(lambda: len(model.received) == 1)
+    restarted = asyncio.create_task(handle_edited_message(edit, second))
+    await until(lambda: len(model.received) == 2)
+    restarted_turn = first.conversation_data[debounce.TURNS][-1]
+    # The same edit delivered again: no second restart, no extra model call.
+    await handle_edited_message(edit, third)
+    assert not restarted_turn.superseded
+    await asyncio.gather(task, restarted)
+
+    assert len(model.received) == 2
+    assert edited.texts("reply_text") == ["answer to the edit"]
+
+
+async def test_a_redelivery_of_a_superseded_unstored_update_is_ignored(make_context, make_update):
+    context = make_context()
+    update = make_update(text="hello", message_id=10)
+    original = debounce.register(update, context)
+    debounce.supersede([original])
+
+    assert debounce.register(update, context) is None
+    # An edit restart of that message may still register.
+    assert debounce.register(update, context, edited=True) is not None

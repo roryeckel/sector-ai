@@ -9,8 +9,9 @@ behind it as usual.
 Turns are tracked per conversation in ``conversation_data["turns"]`` in arrival
 order. A turn waiting for the conversation lock is tracked too, so a burst of
 messages collapses into one answer to the newest of them. A turn only ever
-supersedes turns that arrived before it, and it waits until those have stored
-their messages before it answers, so it always reads them.
+supersedes turns that arrived before it, and it waits until every earlier turn
+has stored its message before it takes the lock, so history keeps arrival
+order and an answer always reads what it supersedes.
 """
 
 import asyncio
@@ -41,10 +42,15 @@ class Turn:
     #: A newer message took over; this turn only records its message.
     superseded: bool = False
     done: bool = False
+    #: Its message is in history (or it never will be: a duplicate, or it left).
+    stored: bool = False
     task: asyncio.Task | None = field(default=None, repr=False)
-    #: Older turns this one took over; it answers after they stored their messages.
+    #: Older turns this one took over.
     replaced: list["Turn"] = field(default_factory=list, repr=False)
-    finished: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
+    #: Edits that arrived before the message was stored, by message ID. The
+    #: turn stores these versions instead of the originals.
+    edits: dict = field(default_factory=dict, repr=False)
+    stored_event: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
 
     @property
     def live(self) -> bool:
@@ -128,7 +134,10 @@ def register(update, context, *, photos=None, restarts: int = 0, edited: bool = 
     identifiers = message_ids(update, photos)
     if not edited and context.is_processed(update):
         return None
-    if any(turn.message_ids & identifiers for turn in turns if not turn.superseded):
+    # An edit restart re-registers the message of the turn it superseded. Any
+    # other overlap is a redelivery, even of a superseded turn that has not
+    # stored its message yet.
+    if any(turn.message_ids & identifiers for turn in turns if not (edited and turn.superseded)):
         return None
     sequence = data.get(SEQUENCE, 0) + 1
     data[SEQUENCE] = sequence
@@ -175,13 +184,28 @@ async def take_over(update, context, turn: Turn) -> bool:
     return True
 
 
-async def wait_for_replaced(turn: Turn) -> None:
-    """Let the turns this one took over store their messages first.
+async def wait_for_earlier(context, turn: Turn) -> None:
+    """Store messages in arrival order: wait until every earlier turn stored its own.
 
-    They never wait on a newer turn, so this cannot deadlock.
+    This covers turns this one took over and turns it did not (an earlier
+    message still being checked, while this one was judged irrelevant to it).
+    Earlier turns never wait on a later one, so this cannot deadlock.
     """
-    for item in turn.replaced:
-        await item.finished.wait()
+    while True:
+        pending = [
+            item
+            for item in context.conversation_data.get(TURNS, [])
+            if item.sequence < turn.sequence and not item.stored
+        ]
+        if not pending:
+            return
+        await pending[0].stored_event.wait()
+
+
+def mark_stored(turn: Turn | None) -> None:
+    if turn is not None:
+        turn.stored = True
+        turn.stored_event.set()
 
 
 def supersede(turns: list[Turn]) -> None:
@@ -193,7 +217,7 @@ def supersede(turns: list[Turn]) -> None:
 
 def leave(context, turn: Turn) -> None:
     turn.done = True
-    turn.finished.set()
+    mark_stored(turn)
     turns = context.conversation_data.get(TURNS)
     if turns is not None and turn in turns:
         turns.remove(turn)
@@ -203,5 +227,13 @@ def turn_for_message(context, message_id: int) -> Turn | None:
     """The live turn answering ``message_id``, if any."""
     for turn in context.conversation_data.get(TURNS, []):
         if turn.live and message_id in turn.message_ids:
+            return turn
+    return None
+
+
+def unstored_turn_for_message(context, message_id: int) -> Turn | None:
+    """A turn, superseded or not, that will still store ``message_id``."""
+    for turn in context.conversation_data.get(TURNS, []):
+        if not turn.stored and message_id in turn.message_ids:
             return turn
     return None

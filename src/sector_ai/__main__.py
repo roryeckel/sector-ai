@@ -204,39 +204,41 @@ def main(argv: list[str] | None = None) -> None:
     # Add command handlers
     # The first matching handler wins within this group. Edits must be captured
     # before every command (including admin controls) and before photo handling.
-    # Edits, text and photos run concurrently (block=False) so a newer message
-    # can supersede a turn that has not replied yet. Each turn still holds the
-    # per-conversation lock, and controls/commands take it too.
+    # Every handler runs concurrently (block=False). A newer message can then
+    # supersede a turn that has not replied yet, and a handler waiting on one
+    # conversation's lock never stalls update fetching for every other chat.
+    # Each turn still holds the per-conversation lock; controls, commands and
+    # events take it too.
     application.add_handler(MessageHandler(MESSAGE_EDIT_FILTER, handle_edited_message, block=False))
-    application.add_handler(CommandHandler("start", start_cmd))
-    application.add_handler(CommandHandler("chat", chat_cmd))
-    application.add_handler(CommandHandler("summarize", summarize_cmd))
-    application.add_handler(CommandHandler("poll", poll_cmd))
-    application.add_handler(CommandHandler("topic", topic_poll_cmd))
-    application.add_handler(CommandHandler("emoji", emoji_cmd))
-    application.add_handler(CommandHandler("code", code_cmd))
-    application.add_handler(CommandHandler("svg", svg_cmd))
-    application.add_handler(CommandHandler("html", html_cmd))
-    application.add_handler(CommandHandler("decide", decide_cmd))
-    application.add_handler(CommandHandler("clear", clear_cmd))
-    application.add_handler(CommandHandler("system", system_prompt_cmd))
-    application.add_handler(CommandHandler("characterize", characterize_cmd))
-    application.add_handler(CommandHandler("temperature", temperature_cmd))
-    application.add_handler(CommandHandler("models", models_cmd))
-    application.add_handler(CallbackQueryHandler(model_callback))
-    application.add_handler(CommandHandler("tokens", tokens_cmd))
-    application.add_handler(CommandHandler("usage", usage_cmd))
-    application.add_handler(CommandHandler("compact", compact_cmd))
-    application.add_handler(CommandHandler("autoreply", autoreply_cmd))
+    application.add_handler(CommandHandler("start", start_cmd, block=False))
+    application.add_handler(CommandHandler("chat", chat_cmd, block=False))
+    application.add_handler(CommandHandler("summarize", summarize_cmd, block=False))
+    application.add_handler(CommandHandler("poll", poll_cmd, block=False))
+    application.add_handler(CommandHandler("topic", topic_poll_cmd, block=False))
+    application.add_handler(CommandHandler("emoji", emoji_cmd, block=False))
+    application.add_handler(CommandHandler("code", code_cmd, block=False))
+    application.add_handler(CommandHandler("svg", svg_cmd, block=False))
+    application.add_handler(CommandHandler("html", html_cmd, block=False))
+    application.add_handler(CommandHandler("decide", decide_cmd, block=False))
+    application.add_handler(CommandHandler("clear", clear_cmd, block=False))
+    application.add_handler(CommandHandler("system", system_prompt_cmd, block=False))
+    application.add_handler(CommandHandler("characterize", characterize_cmd, block=False))
+    application.add_handler(CommandHandler("temperature", temperature_cmd, block=False))
+    application.add_handler(CommandHandler("models", models_cmd, block=False))
+    application.add_handler(CallbackQueryHandler(model_callback, block=False))
+    application.add_handler(CommandHandler("tokens", tokens_cmd, block=False))
+    application.add_handler(CommandHandler("usage", usage_cmd, block=False))
+    application.add_handler(CommandHandler("compact", compact_cmd, block=False))
+    application.add_handler(CommandHandler("autoreply", autoreply_cmd, block=False))
 
     # Add message handler
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message, block=False))
     # Photos join the same agent turn as text; albums become one turn.
     application.add_handler(MessageHandler(filters.PHOTO, handle_photo, block=False))
-    application.add_handler(MessageHandler(CHAT_EVENT_FILTER, handle_chat_event))
-    application.add_handler(PollHandler(handle_poll_result))
-    application.add_handler(PollAnswerHandler(handle_poll_answer))
-    application.add_handler(ChatMemberHandler(handle_bot_membership, ChatMemberHandler.MY_CHAT_MEMBER))
+    application.add_handler(MessageHandler(CHAT_EVENT_FILTER, handle_chat_event, block=False))
+    application.add_handler(PollHandler(handle_poll_result, block=False))
+    application.add_handler(PollAnswerHandler(handle_poll_answer, block=False))
+    application.add_handler(ChatMemberHandler(handle_bot_membership, ChatMemberHandler.MY_CHAT_MEMBER, block=False))
 
     application.add_error_handler(error_handler)
 

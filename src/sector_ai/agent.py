@@ -79,6 +79,7 @@ async def run_agent(
     engage=None,
     edited=False,
     restarts=0,
+    turn=None,
 ) -> None:
     """Run one turn. ``photos`` lists the messages whose photos belong to it (an album).
 
@@ -92,16 +93,17 @@ async def run_agent(
         await handle_message_edit(update, context)
         return
     context.bind_update(update)
-    turn = None
-    if debounce and context.settings.debounce_max_restarts > 0 and not command:
-        # Synchronous, so the finally below always unregisters it.
+    if turn is None and debounce and context.settings.debounce_max_restarts > 0 and not command:
+        # Synchronous, so the finally below always unregisters it. A caller
+        # may register earlier to claim its place in arrival order.
         turn = debounce_turns.register(update, context, photos=photos, restarts=restarts, edited=edited)
     try:
         if turn is not None:
             if await debounce_turns.take_over(update, context, turn):
                 engage = True
-            # Turns this one superseded store their messages before it answers.
-            await debounce_turns.wait_for_replaced(turn)
+            # Every earlier message is stored first, so history keeps arrival
+            # order and the answer reads everything it supersedes.
+            await debounce_turns.wait_for_earlier(context, turn)
         await _run_turn(
             update,
             context,
@@ -142,6 +144,7 @@ async def _run_turn(
         unsupported = context.bot_data.setdefault("non_tool_models", set())
 
         async def ingest_node(state):
+            nonlocal update
             accepted = context.accept_update(update) if ingest else True
             if accepted and ingest:
                 message = update.effective_message
@@ -158,9 +161,20 @@ async def _run_turn(
                 include_command = bool(command) or bool(system_prompt)
                 if photos:
                     images = await load_photos(photos, context.settings)
-                    context.save_user_message(message, include_command=include_command, album=photos, images=images)
+                # Read after the last await: an edit that arrived before this
+                # point is stored instead of the original.
+                edits = turn.edits if turn is not None else {}
+                latest = edits.get(getattr(message, "message_id", None), message)
+                if latest is not message:
+                    # Decide and answer on the edited text, too.
+                    message = latest
+                    update = _WithMessage(update, latest)
+                if photos:
+                    album = [edits.get(getattr(item, "message_id", None), item) for item in photos]
+                    context.save_user_message(message, include_command=include_command, album=album, images=images)
                 else:
                     context.save_user_message(message, include_command=include_command)
+            debounce_turns.mark_stored(turn)
             return {"accepted": accepted}
 
         async def engagement_node(state):
@@ -525,6 +539,18 @@ async def _run_turn(
             context._turn = None
             context._request_model = None
             context._request_model_name = None
+
+
+class _WithMessage:
+    """An update whose message was edited before its turn stored it."""
+
+    def __init__(self, update, message):
+        self._update = update
+        self.effective_message = message
+        self.message = message
+
+    def __getattr__(self, name):
+        return getattr(self._update, name)
 
 
 def _discard_pending(context, message) -> None:

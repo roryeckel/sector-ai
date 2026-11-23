@@ -8,7 +8,7 @@ from langchain_core.messages import HumanMessage
 from telegram.ext import filters
 
 from .chat_metadata import actor_metadata, message_metadata, text_value, utc_now, utc_timestamp
-from .debounce import supersede, turn_for_message
+from .debounce import leave, register, supersede, turn_for_message, unstored_turn_for_message
 from .history import scoped_control
 from .poll_tracking import poll_vote_labels
 from .sector_context import SectorContext
@@ -93,21 +93,79 @@ def observed_event(event: dict, metadata: dict):
     )
 
 
+def _edit_version(update) -> dict | None:
+    """When the edit was made, its update order and a digest of its text."""
+    message = update.effective_message
+    if type(getattr(message, "message_id", None)) is not int:
+        return None
+    metadata = message_metadata(message)
+    text = text_value(getattr(message, "text", None), 4096) or text_value(getattr(message, "caption", None), 4096)
+    update_id = getattr(update, "update_id", None)
+    return {
+        "at": metadata.get("edited_at") or utc_now(),
+        "sequence": update_id if type(update_id) is int else -1,
+        "digest": sha256((text or "[non-text edit]").encode()).hexdigest(),
+        "text": text,
+    }
+
+
+def edit_changes_message(update, context) -> bool:
+    """Whether this edit is new, not stale, and not a redelivery. Never awaits."""
+    version = _edit_version(update)
+    if version is None or context.is_processed(update):
+        return False
+    previous = context.conversation_data.get("message_edits", {}).get(update.effective_message.message_id)
+    if previous:
+        at, sequence = version["at"], version["sequence"]
+        if at < previous["at"] or (at == previous["at"] and sequence < previous["sequence"]):
+            return False
+        if at == previous["at"] and version["digest"] == previous["digest"]:
+            return False
+    return True
+
+
+def _record_edit_version(context, message_id: int, version: dict) -> None:
+    versions = context.conversation_data.setdefault("message_edits", {})
+    versions[message_id] = {key: version[key] for key in ("at", "sequence", "digest")}
+    while len(versions) > 512:
+        versions.pop(next(iter(versions)))
+
+
 async def handle_edited_message(update, context):
     """Apply an edit; if it changes a message the bot is still silently working on, restart that turn."""
     context.bind_update(update)
-    message_id = getattr(update.effective_message, "message_id", None)
+    message = update.effective_message
+    message_id = getattr(message, "message_id", None)
     limit = context.settings.debounce_max_restarts
-    turn = turn_for_message(context, message_id) if type(message_id) is int and limit > 0 else None
-    # Only a running turn has ingested its message, so only then does the edit
-    # replace text the restarted turn will read.
-    if turn is None or turn.task is None or turn.restarts >= limit:
+    if type(message_id) is not int or limit <= 0:
+        await handle_message_edit(update, context)
+        return
+    waiting = unstored_turn_for_message(context, message_id)
+    if waiting is not None:
+        # Its turn has not stored the message yet, so it stores this version
+        # instead. Nothing to correct in history and nothing to restart.
+        if edit_changes_message(update, context) and context.accept_update(update):
+            _record_edit_version(context, message_id, _edit_version(update))
+            waiting.edits[message_id] = message
+            logger.info("Edit of message %s will be stored before its turn answers", message_id)
+        return
+    turn = turn_for_message(context, message_id)
+    # Only a real change restarts a turn: a redelivered, stale or unchanged
+    # edit must not cost a restart or a model call.
+    if turn is None or turn.task is None or turn.restarts >= limit or not edit_changes_message(update, context):
         await handle_message_edit(update, context)
         return
     engage = True if turn.engaged else None
     supersede([turn])
+    # Registered before any await, so it keeps this edit's place in arrival order.
+    replacement = register(update, context, restarts=turn.restarts + 1, edited=True)
     logger.info("Edit of message %s restarted its unanswered turn", message_id)
-    await handle_message_edit(update, context)
+    try:
+        await handle_message_edit(update, context)
+    except BaseException:
+        if replacement is not None:
+            leave(context, replacement)
+        raise
     from .agent import run_agent
 
     await run_agent(
@@ -118,31 +176,26 @@ async def handle_edited_message(update, context):
         engage=engage,
         edited=True,
         restarts=turn.restarts + 1,
+        turn=replacement,
     )
 
 
 @scoped_control
-async def handle_message_edit(update, context):
-    """Update retained text and append a correction, never rerun the command."""
+async def handle_message_edit(update, context) -> bool:
+    """Update retained text and append a correction, never rerun the command.
+
+    Returns whether the edit was applied.
+    """
     message = update.effective_message
-    message_id = getattr(message, "message_id", None)
-    if type(message_id) is not int:
-        return
-    metadata = message_metadata(message)
-    edited_at = metadata.get("edited_at") or utc_now()
-    text = text_value(getattr(message, "text", None), 4096) or text_value(getattr(message, "caption", None), 4096)
-    digest = sha256((text or "[non-text edit]").encode()).hexdigest()
-    versions = context.conversation_data.setdefault("message_edits", {})
-    previous = versions.get(message_id)
-    update_id = getattr(update, "update_id", None)
-    sequence = update_id if type(update_id) is int else -1
-    if previous:
-        if edited_at < previous["at"] or (edited_at == previous["at"] and sequence < previous["sequence"]):
-            return
-        if edited_at == previous["at"] and digest == previous["digest"]:
-            return
+    version = _edit_version(update)
+    if version is None or not edit_changes_message(update, context):
+        return False
     if not context.accept_update(update):
-        return
+        return False
+    message_id = message.message_id
+    metadata = message_metadata(message)
+    edited_at = version["at"]
+    text = version["text"]
     event = {
         "event": "message_edited",
         "message_id": message_id,
@@ -167,7 +220,7 @@ async def handle_message_edit(update, context):
         ):
             # An edit arriving late must not replace a newer version.
             if original.get("edited_at", "") > edited_at:
-                return
+                return False
             event["previous_excerpt"] = item.content[:600]
             images = item.additional_kwargs.get("images")
             if images:
@@ -180,11 +233,10 @@ async def handle_message_edit(update, context):
             break
     event["original_in_recent_history"] = found
     event["new_excerpt" if found else "new_content"] = (text or "[non-text message edited]")[: 600 if found else 4096]
-    versions[message_id] = {"at": edited_at, "sequence": sequence, "digest": digest}
-    while len(versions) > 512:
-        versions.pop(next(iter(versions)))
+    _record_edit_version(context, message_id, version)
     context.chat_message_history.append(observed_event(event, metadata))
     context._enforce_history_cap()
+    return True
 
 
 def poll_voter(answer) -> dict:

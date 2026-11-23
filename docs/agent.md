@@ -162,8 +162,9 @@ bypass this model decision as before.
 
 ### Debouncing
 
-Text, photo and edit updates are handled concurrently; each turn still holds
-the conversation lock, as do commands and controls. A turn is *committed* from
+Every update is handled concurrently, so a command, event or poll vote waiting
+on one conversation's lock never stalls other chats. Each turn still holds the
+conversation lock, as do commands, controls and events. A turn is *committed* from
 the moment it starts its first Telegram write (reply text, reaction, poll,
 image, page) or its first tool execution. The flag is set before the request
 goes out. Until then the turn has had no visible effect, so a newer message can
@@ -180,14 +181,20 @@ take it over:
   with every message in context, replying to the newest one.
 - An edit of the message an uncommitted running turn is answering cancels that
   turn, applies the edit, and starts a new turn on the edited text. It reuses
-  the original engagement decision if one was made.
+  the original engagement decision if one was made. Only an edit that changes
+  the message does this: a redelivered, stale or unchanged edit is ignored.
+- An edit that arrives before its turn has stored the message (while the turn
+  waits for the lock or for an album) is kept on the turn. The turn stores,
+  decides on and answers the edited text, with no separate edit event.
 - Otherwise, including any message after the bot has replied or acted, the new
   message waits and runs as its own turn, with its own engagement decision.
 
-A turn only supersedes turns that arrived before it, and waits until each of
-them has stored its message before answering, so a message still being checked
-is never lost or answered after its replacement. A redelivered update never
-takes over the turn it duplicates. Commit and supersede exclude each other: a
+A turn only supersedes turns that arrived before it. Every turn waits until all
+earlier turns have stored their messages before it takes the lock, whether or
+not it took them over, so history keeps arrival order and a message still being
+checked is never lost or answered after its replacement. A redelivered update
+never takes over the turn it duplicates, even one that was superseded and has
+not stored its message yet. Commit and supersede exclude each other: a
 preview write queued by a turn that was just superseded is refused before it
 reaches Telegram.
 
