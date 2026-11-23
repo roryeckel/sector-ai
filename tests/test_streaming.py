@@ -647,3 +647,24 @@ async def test_a_transient_delete_failure_is_retried_on_the_next_turn(make_conte
 
     await context.remove_pending_placeholder()
     assert context.conversation_data["pending_placeholder"]["message_id"] == 42
+
+
+async def test_a_network_error_after_delivery_keeps_the_delivered_text(
+    make_context, recording_message, quiet_settings, monkeypatch
+):
+    context = make_context(settings=quiet_settings)
+    context.bot.send_message = AsyncMock(return_value=SimpleNamespace(message_id=7))
+    source = recording_message()
+    chunk = AIMessageChunk(
+        content="x" * 5000,
+        usage_metadata={"input_tokens": 10, "output_tokens": 1, "total_tokens": 11},
+    )
+    monkeypatch.setattr(
+        "sector_ai.streaming_handler.record_usage",
+        lambda *args, **kwargs: (_ for _ in ()).throw(NetworkError("502")),
+    )
+
+    response = await handle_streaming_response(context, LazyReply(context, source), aiter_chunks([chunk]), "Chat")
+
+    assert response.replace("\n", "") == "x" * 5000
+    assert context.bot.send_message.await_count == 1

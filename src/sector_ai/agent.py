@@ -100,7 +100,10 @@ async def run_agent(
         turn = debounce_turns.register(update, context, photos=photos, restarts=restarts, edited=edited)
     try:
         if turn is not None:
-            if await debounce_turns.take_over(update, context, turn):
+            # ``engage=False`` means "store this, stay silent" (an album
+            # straggler): it keeps its place in arrival order but never takes
+            # over a turn that would otherwise answer.
+            if engage is not False and await debounce_turns.take_over(update, context, turn):
                 engage = True
             # Every earlier message is stored first, so history keeps arrival
             # order and the answer reads everything it supersedes.
@@ -336,6 +339,11 @@ async def _run_turn(
                 context.conversation_data["tool_schemas"] = []
                 return await model_node(state)
             if not complete:
+                # The stream failed after some text reached the chat. Keep it
+                # in history: the user saw it, and the next turn may refer to
+                # it. No incomplete tool call is retained.
+                if delivered_text and save_ai_message:
+                    context.save_assistant_message(delivered_text, placeholder.message)
                 return {"finished": True}
             response = message_chunk_to_message(aggregate) if aggregate is not None else AIMessage(content="")
             if response.tool_calls or response.invalid_tool_calls or getattr(aggregate, "tool_call_chunks", None):

@@ -465,3 +465,55 @@ async def test_a_caption_removal_still_applies_after_the_id_is_evicted(make_cont
 
     assert await handle_message_edit(text_update(None, edited=True), context) is True
     assert "old caption" not in context.chat_message_history[0].content
+
+
+def test_poll_voter_reads_the_legacy_voter_payload():
+    from sector_ai.chat_events import poll_voter
+
+    answer = SimpleNamespace(
+        user=None,
+        api_kwargs={"voter": {"id": 7, "username": "bob", "first_name": "Bob", "is_bot": False}},
+        voter_chat=None,
+    )
+
+    assert poll_voter(answer) == {"id": 7, "username": "bob", "display_name": "Bob", "is_bot": False}
+
+
+def test_poll_voter_reads_an_anonymous_voter_chat():
+    from sector_ai.chat_events import poll_voter
+
+    answer = SimpleNamespace(
+        user=None, api_kwargs=None, voter_chat=SimpleNamespace(id=9, username="chan", title="The Channel")
+    )
+
+    assert poll_voter(answer) == {"id": 9, "username": "chan", "display_name": "The Channel"}
+
+
+def test_poll_voter_without_any_voter_is_empty():
+    from sector_ai.chat_events import poll_voter
+
+    assert poll_voter(SimpleNamespace(user=None, api_kwargs=None, voter_chat=None)) == {}
+
+
+async def test_a_poll_answer_update_without_an_answer_is_ignored(make_context):
+    from sector_ai.chat_events import handle_poll_answer
+
+    update = SimpleNamespace(poll_answer=None)
+
+    await handle_poll_answer(update, make_context())
+
+
+def test_poll_snapshots_skip_blank_options():
+    from sector_ai.poll_tracking import poll_option_snapshot
+
+    poll = SimpleNamespace(options=[SimpleNamespace(text="", voter_count=1), SimpleNamespace(text="ok", voter_count=2)])
+
+    assert poll_option_snapshot(poll) == [{"text": "ok"}]
+
+
+def test_an_edit_without_a_message_id_changes_nothing(make_context):
+    from sector_ai.chat_events import edit_changes_message
+
+    update = SimpleNamespace(effective_message=SimpleNamespace(message_id=None), update_id=900)
+
+    assert edit_changes_message(update, make_context()) is False

@@ -889,3 +889,143 @@ async def test_a_tool_timing_out_after_its_send_started_stays_uncertain(agent_co
 
     receipt = json.loads(next(m for m in context.chat_message_history if isinstance(m, ToolMessage)).content)
     assert receipt["status"] == "execution_uncertain"
+
+
+class FailingStreamModel(BaseChatModel):
+    """Streams some text, then the backend fails."""
+
+    @property
+    def _llm_type(self):
+        return "failing-stream"
+
+    def bind_tools(self, tools, **kwargs):
+        return self.bind(tools=tools, **kwargs)
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        raise AssertionError("use the async path")
+
+    async def _astream(self, messages, stop=None, run_manager=None, **kwargs):
+        yield ChatGenerationChunk(message=AIMessageChunk(content="partial answer"))
+        # Let the preview reach Telegram, then fail mid-stream.
+        await asyncio.sleep(0.05)
+        raise RuntimeError("stream broke")
+
+
+async def test_text_delivered_before_a_stream_failure_is_saved(make_context, make_settings, make_update):
+    context = make_context(
+        model=FailingStreamModel(),
+        settings=make_settings(context_length=8192, streaming_interval_sec=0, streaming_chunk_size=0),
+    )
+    update = make_update(text="hello")
+
+    await run_agent(update, context, force=True)
+
+    assert "partial answer" in " ".join(update.effective_message.shown())
+    # The user saw it, so the next turn must too.
+    assert any(
+        isinstance(message, AIMessage) and "partial answer" in message.content
+        for message in context.chat_message_history
+    )
+    assert not any(isinstance(message, ToolMessage) for message in context.chat_message_history)
+
+
+def test_discard_pending_removes_the_request_and_its_bookkeeping(make_context):
+    from sector_ai.agent import _discard_pending
+
+    context = make_context()
+    pending = AIMessage(content="", tool_calls=[{"name": "x", "args": {}, "id": "c", "type": "tool_call"}])
+    context.chat_message_history.append(pending)
+    context.conversation_data.update(
+        active_tool_call_id="c", started_tool_call_ids=["c"], interrupted_delivery={"tool_call_id": "c"}
+    )
+
+    _discard_pending(context, pending)
+
+    assert context.chat_message_history == []
+    assert "active_tool_call_id" not in context.conversation_data
+
+
+def test_close_pending_without_a_transaction_clears_bookkeeping(make_context):
+    from sector_ai.agent import _close_pending
+
+    context = make_context()
+    context.conversation_data["started_tool_call_ids"] = ["c"]
+
+    _close_pending(context, AIMessage(content="not in history"))
+
+    assert "started_tool_call_ids" not in context.conversation_data
+
+
+def test_close_pending_records_every_unfinished_call(make_context):
+    from sector_ai.agent import _close_pending
+
+    context = make_context()
+    pending = AIMessage(
+        content="",
+        tool_calls=[
+            {"name": "first", "args": {}, "id": "done", "type": "tool_call"},
+            {"name": "second", "args": {}, "id": "started", "type": "tool_call"},
+            {"name": "third", "args": {}, "id": "marked", "type": "tool_call"},
+        ],
+    )
+    context.chat_message_history = [
+        pending,
+        ToolMessage(content="{}", tool_call_id="done", name="first", status="success"),
+        HumanMessage(content="later"),
+    ]
+    context.conversation_data.update(started_tool_call_ids=["started", "marked"], marked_tool_call_ids=["marked"])
+
+    _close_pending(context, pending)
+
+    receipts = {
+        message.tool_call_id: json.loads(message.content)
+        for message in context.chat_message_history
+        if isinstance(message, ToolMessage)
+    }
+    assert set(receipts) == {"done", "started", "marked"}
+    assert receipts["started"]["status"] == "execution_uncertain"
+    assert receipts["marked"]["status"] == "not_executed"
+
+
+def test_strict_tool_calls_rejects_repairs_and_accepts_provider_shapes():
+    from sector_ai.agent import _strict_tool_calls
+
+    repaired = AIMessage(content="", invalid_tool_calls=[{"name": "x", "args": "{", "id": "1"}])
+    with pytest.raises(ValueError, match="invalid tool arguments"):
+        _strict_tool_calls(repaired)
+
+    legacy = AIMessage(
+        content="",
+        additional_kwargs={"tool_calls": [{"function": {"name": "x", "arguments": '{"a": 1}'}, "id": "2"}]},
+    )
+    assert _strict_tool_calls(legacy)[0]["args"] == {"a": 1}
+
+    with pytest.raises(ValueError, match="incomplete or invalid"):
+        _strict_tool_calls(AIMessage(content="", tool_call_chunks=[{"name": "x", "args": '{"a": NaN}', "id": "3"}]))
+
+    with pytest.raises(ValueError, match="incomplete or invalid"):
+        _strict_tool_calls(AIMessage(content="", tool_call_chunks=[{"name": "", "args": "{}", "id": "4"}]))
+
+
+async def test_an_empty_tool_capable_answer_says_so(make_context, make_settings, make_update):
+    context = make_context(
+        model=ToolModel(responses=[AIMessage(content="")]),
+        settings=make_settings(context_length=8192, streaming_interval_sec=999, streaming_chunk_size=999999),
+    )
+    update = make_update(text="hello")
+
+    await run_agent(update, context, force=True)
+
+    assert update.effective_message.texts("reply_text") == ["The model returned an empty response."]
+
+
+async def test_an_oversized_prompt_fails_with_a_readable_message(make_context, make_settings, make_update):
+    context = make_context(
+        model=ToolModel(responses=[AIMessage(content="unused")]),
+        settings=make_settings(context_length=1, streaming_interval_sec=999, streaming_chunk_size=999999),
+    )
+    update = make_update(text="this is far too long for a one token window")
+
+    await run_agent(update, context, force=True)
+
+    assert "exceed the model's context window" in update.effective_message.texts("reply_text")[-1]

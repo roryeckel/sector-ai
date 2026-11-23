@@ -1077,3 +1077,40 @@ def test_abandoned_placeholders_are_bounded(make_context):
         context.mark_placeholder_unsettled(SimpleNamespace(message_id=message_id, chat_id=1))
 
     assert len(context.conversation_data["abandoned_placeholders"]) == 16
+
+
+def test_positive_int_accepts_only_real_positive_numbers():
+    from sector_ai.sector_context import _positive_int
+
+    assert _positive_int(True) is None
+    assert _positive_int(3.9) == 3
+    assert _positive_int(-2.0) is None
+    assert _positive_int(" 12 ") == 12
+    assert _positive_int("not a number") is None
+
+
+def test_sent_by_bot_tracks_only_recorded_sends(make_context):
+    context = make_context()
+    context.remember_sent(SimpleNamespace(message_id=5))
+
+    assert context.sent_by_bot(5) is True
+    assert context.sent_by_bot(6) is False
+
+
+def test_cache_settings_ignored_by_the_backend_are_reported(make_context, make_settings):
+    wrong_ttl = make_context("unused", settings=make_settings(llm_provider="ollama", prompt_cache_ttl="30m"))
+    wrong_retention = make_context(
+        "unused", settings=make_settings(llm_provider="ollama", prompt_cache_retention="24h")
+    )
+
+    assert any("only applies to OpenAI" in warning for warning in wrong_ttl.cache_setting_warnings())
+    assert any("RETENTION only applies" in warning for warning in wrong_retention.cache_setting_warnings())
+
+
+def test_usage_summary_tolerates_bad_state(make_context):
+    context = make_context()
+    context.bot_data["usage_stats"] = []
+    assert context.usage_summary() == []
+
+    context.bot_data["usage_stats"] = {("model", "workload"): "not a row"}
+    assert context.usage_summary() == []

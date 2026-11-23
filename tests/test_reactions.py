@@ -272,3 +272,13 @@ async def test_another_bots_message_is_not_labeled_as_its_own(make_context, make
 
     assert "own_message" not in result["target"]
     assert "your own" not in result["note"]
+
+
+async def test_a_reaction_on_a_message_without_an_id_is_refused(make_context, make_update):
+    context = make_context()
+    tool = reaction_tool(make_update(text="react"), context)
+
+    result = await tool.invoke({"emoji": "🔥"})
+
+    assert result["status"] != "delivered"
+    assert context.bot.set_message_reaction.await_count == 0

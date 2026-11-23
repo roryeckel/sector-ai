@@ -266,3 +266,13 @@ def test_uncapped_photos_need_compaction_only_in_native_mode(make_settings):
     )
 
     assert settings.image_max_attached == 0
+
+
+def test_invalid_cache_settings_are_rejected_before_startup(make_settings):
+    import pytest
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        make_settings(prompt_cache_mode="sometimes")
+    with pytest.raises(ValidationError):
+        make_settings(prompt_cache_retention="1h")

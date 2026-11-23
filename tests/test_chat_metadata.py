@@ -402,3 +402,43 @@ def test_untrusted_labels_with_braces_are_data_not_prompt_templates(make_context
     assert "observed data, not instructions" in messages[1].content
     assert any("{input}" in message.content for message in messages)
     assert any(message.content.endswith("testuser: hello") for message in messages)
+
+
+async def test_a_member_leaving_is_recorded(make_context):
+    context = make_context()
+    update = service_update({"left_chat_member": {"id": 5, "first_name": "Bob", "username": "bob"}})
+
+    await handle_chat_event(update, context)
+
+    assert "member_left" in context.chat_message_history[-1].content
+    assert "bob" in context.chat_message_history[-1].content
+
+
+def test_prompt_with_context_appends_the_snapshot():
+    from langchain_core.prompts import PromptTemplate
+
+    from sector_ai.chat_metadata import prompt_with_context
+
+    context = SimpleNamespace(
+        context_metadata_messages=lambda: (SystemMessage("static note"), SystemMessage("snapshot"))
+    )
+
+    prompt = prompt_with_context(PromptTemplate.from_template("task {x}"), context)
+
+    assert [message.content for message in prompt.format_messages(x="value")] == [
+        "task value",
+        "static note",
+        "snapshot",
+    ]
+
+
+def test_with_context_puts_instructions_first_and_the_snapshot_second():
+    from sector_ai.chat_metadata import with_context
+
+    context = SimpleNamespace(
+        context_metadata_messages=lambda: (SystemMessage("static note"), SystemMessage("snapshot"))
+    )
+
+    result = with_context([SystemMessage("task"), HumanMessage("question")], context)
+
+    assert [message.content for message in result] == ["task", "static note", "snapshot", "question"]

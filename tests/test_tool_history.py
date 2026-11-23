@@ -149,3 +149,82 @@ def test_clip_utf16_counts_emoji_twice_and_never_splits_one():
     assert utf16_len(clipped) <= 4096
     assert clipped == "🔥" * 2048
     assert clip_utf16("👨‍👩", 3) == "👨"
+
+
+def test_svg_validation_rejects_every_dangerous_form():
+    import pytest
+
+    from sector_ai.capabilities import validate_svg
+
+    for source in [
+        "<svg><style>@import url(x.css)</style></svg>",
+        "<html/>",
+        '<svg><use href="http://example.com/a.svg"/></svg>',
+        '<svg><rect fill="url(http://example.com/a.svg)"/></svg>',
+    ]:
+        with pytest.raises(ValueError):
+            validate_svg(source)
+
+
+def test_telegram_references_reads_documents_and_photos():
+    from types import SimpleNamespace
+
+    from sector_ai.capabilities import telegram_references
+
+    document = SimpleNamespace(message_id=3, document=SimpleNamespace(file_id="doc"), photo=[])
+    photo = SimpleNamespace(message_id=4, document=None, photo=[SimpleNamespace(file_id="pic")])
+
+    assert telegram_references(document)["file_id"] == "doc"
+    assert telegram_references(photo)["file_id"] == "pic"
+    assert telegram_references(SimpleNamespace(message_id=5))["message_id"] == 5
+
+
+async def test_a_generic_send_failure_is_reported(make_context, make_update):
+    from unittest.mock import AsyncMock
+
+    from sector_ai.capabilities import GeneratedOutput, deliver_output
+
+    context = make_context()
+    update = make_update(text="hi")
+    update.effective_message.reply_photo = AsyncMock(side_effect=RuntimeError("boom"))
+
+    result = await deliver_output(GeneratedOutput("svg", {"svg": "<svg/>"}, "", None), update, context)
+
+    assert result["status"] == "delivery_failed"
+    assert "boom" in result["error"]
+
+
+async def test_a_bookkeeping_failure_still_reports_the_artifact_as_delivered(make_context, make_update):
+    from unittest.mock import Mock
+
+    from sector_ai.capabilities import GeneratedOutput, deliver_output
+
+    context = make_context()
+    context.remember_sent = Mock(side_effect=RuntimeError("bookkeeping broke"))
+    update = make_update(text="hi")
+
+    result = await deliver_output(GeneratedOutput("html", {"html": "<p>x</p>"}, "", None), update, context)
+
+    assert result["status"] == "delivered"
+    assert result["note"]
+
+
+def test_non_serialisable_tool_values_are_stringified(make_settings):
+    from datetime import UTC, datetime
+
+    from sector_ai.tools import result_content
+
+    text = result_content({"when": datetime(2026, 1, 1, tzinfo=UTC)}, make_settings())
+
+    assert "2026" in text
+
+
+def test_a_receipt_with_a_huge_note_still_fits(make_settings):
+    from sector_ai.tools import result_content
+
+    text = result_content(
+        {"status": "delivered", "html": "x" * 5000, "note": "n" * 900},
+        make_settings(tool_result_max_chars=1024),
+    )
+
+    assert len(text) <= 1024

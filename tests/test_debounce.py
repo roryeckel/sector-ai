@@ -252,8 +252,12 @@ async def test_a_newer_message_never_loses_one_still_being_checked(chat, make_up
     task_b = asyncio.create_task(run_agent(b, second, debounce=True))
     await until(lambda: len(first.conversation_data[debounce.TURNS]) == 2)
     # C replies to the bot, so it takes over A and B while B is still deciding.
+    # Hold the turn objects: the superseded turn leaves TURNS, so a positional
+    # slice would soon include C itself.
+    turn_a = first.conversation_data[debounce.TURNS][0]
+    turn_b = first.conversation_data[debounce.TURNS][1]
     task_c = asyncio.create_task(run_agent(c, third, debounce=True))
-    await until(lambda: all(turn.superseded for turn in first.conversation_data[debounce.TURNS][:2]))
+    await until(lambda: turn_a.superseded and turn_b.superseded)
     # B's decision now returns "relevant", but B must not cancel the newer C.
     decision_gates[b_text].set()
     await asyncio.gather(task_a, task_b, task_c)
@@ -484,3 +488,23 @@ async def test_a_second_edit_during_an_edit_restart_is_not_lost(make_context, ma
     assert humans(context)[0] == "testuser: version two"
     # The original text survives only as the event's "previous excerpt".
     assert not any(content.startswith("testuser: version zero") for content in humans(context))
+
+
+async def test_a_context_only_turn_never_takes_over_another(chat, make_update, make_photo):
+    gate = asyncio.Event()
+    model, (first, second, *_) = chat((AIMessage(content="answer to the question"), gate))
+    question = make_update(text="what is this?", message_id=10)
+    task = asyncio.create_task(run_agent(question, first, debounce=True))
+    await until(lambda: len(model.received) == 1)
+    turn = first.conversation_data[debounce.TURNS][0]
+    late = make_update(text=None, caption="late photo", photos=[make_photo()], message_id=11)
+    # The first turn holds the conversation lock while its model is gated.
+    context_only = asyncio.create_task(run_agent(late, second, photos=[late.message], engage=False, debounce=True))
+    await until(lambda: len(first.conversation_data[debounce.TURNS]) == 2)
+    gate.set()
+    await asyncio.gather(task, context_only)
+
+    assert turn.superseded is False
+    assert late.message.shown() == []
+    assert question.message.texts("reply_text") == ["answer to the question"]
+    assert any("late photo" in content for content in humans(first))
