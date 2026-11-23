@@ -218,3 +218,16 @@ def test_configure_logging_redacts_real_records(isolated_root):
     assert TOKEN not in output
     assert "bot<redacted>/getMe" in output
     assert "HTTP Request: POST" in output
+
+
+def test_only_user_facing_errors_are_shown_verbatim():
+    from sector_ai.errors import UserFacingError
+    from sector_ai.logging_utils import user_error_text
+
+    shown = user_error_text(ValueError("Invalid URL 'http://10.0.0.5:11434/v1' from a library"), None)
+
+    assert shown.startswith("Something went wrong (reference ")
+    assert "10.0.0.5" not in shown
+    assert user_error_text(UserFacingError("Conversation exceeds the window."), None) == (
+        "Conversation exceeds the window."
+    )

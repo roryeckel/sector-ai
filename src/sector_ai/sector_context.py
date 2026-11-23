@@ -15,7 +15,7 @@ from langchain_ollama.chat_models import ChatOllama
 from langchain_openai import ChatOpenAI
 from telegram import Message
 from telegram.constants import MessageLimit
-from telegram.error import BadRequest
+from telegram.error import BadRequest, NetworkError
 from telegram.ext import Application, CallbackContext
 
 from .chat_metadata import (
@@ -51,6 +51,9 @@ logger = logging.getLogger(__name__)
 
 # Used when neither the settings nor the server can provide a context window.
 DEFAULT_CONTEXT_LENGTH = 8192
+
+# Placeholders awaiting cleanup. Old ones are dropped rather than retried forever.
+MAX_ABANDONED_PLACEHOLDERS = 16
 
 
 def _positive_int(value: object) -> Optional[int]:
@@ -89,7 +92,24 @@ def _character_tokens(character: str) -> float:
         return 3.0
     if 0x2E80 <= code <= 0x9FFF or 0xAC00 <= code <= 0xD7AF or 0xF900 <= code <= 0xFAFF or 0xFF00 <= code <= 0xFFEF:
         return 1.5
-    return 1.0
+    if 0x0370 <= code <= 0x03FF:
+        # Greek: uppercase runs are split by byte-fallback tokenizers.
+        return 2.0
+    if (
+        0x00C0 <= code <= 0x024F  # Latin extended
+        or 0x0400 <= code <= 0x04FF  # Cyrillic
+        or 0x0600 <= code <= 0x06FF  # Arabic
+        or 0x0750 <= code <= 0x077F  # Arabic supplement
+        or 0x08A0 <= code <= 0x08FF  # Arabic extended
+    ):
+        return 1.25
+    if 0x0590 <= code <= 0x05FF:
+        # Hebrew with vowel points is tokenized poorly.
+        return 1.75
+    # Everything else (Indic, Thai, Lao, Myanmar, Khmer, rare scripts, symbols)
+    # is byte-fallback territory for several tokenizers: two to three tokens
+    # per character. Overestimating here only costs an exact count.
+    return 2.5
 
 
 def _estimate_text_tokens(text: str) -> int:
@@ -165,7 +185,7 @@ class SectorContext(CallbackContext):
             if self._unsettled(previous):
                 # An earlier reply in this turn still shows a cursor. A later
                 # reply must not take over its slot and forget it.
-                self.conversation_data.setdefault("abandoned_placeholders", []).append(previous)
+                self._track_abandoned(previous)
             self.conversation_data["pending_placeholder"] = {
                 "message_id": message_id,
                 "chat_id": self._chat_id,
@@ -201,9 +221,13 @@ class SectorContext(CallbackContext):
         if type(chat_id) is int:
             # Not the tracked reply (an already posted message passed in), so
             # it gets its own cleanup slot.
-            self.conversation_data.setdefault("abandoned_placeholders", []).append(
-                {"message_id": message_id, "chat_id": chat_id}
-            )
+            self._track_abandoned({"message_id": message_id, "chat_id": chat_id})
+
+    def _track_abandoned(self, pending: dict) -> None:
+        """Queue one placeholder for cleanup at the next turn, keeping a few."""
+        abandoned = self.conversation_data.setdefault("abandoned_placeholders", [])
+        abandoned.append(pending)
+        del abandoned[:-MAX_ABANDONED_PLACEHOLDERS]
 
     def finish_placeholder(self) -> None:
         """Forget the tracked reply unless its final edit left a cursor behind."""
@@ -241,12 +265,18 @@ class SectorContext(CallbackContext):
         try:
             await self.bot.delete_message(chat_id=chat_id, message_id=message_id)
             logger.info("Removed an abandoned processing placeholder")
-        except BadRequest:
-            # Already gone, or too old to delete. Do not retry forever.
-            pass
+        except NetworkError as error:
+            if isinstance(error, BadRequest):
+                # Already gone, or too old to delete. Do not retry forever.
+                pass
+            else:
+                # Timed out or flood control: worth trying again later.
+                logger.debug("Could not remove an abandoned processing placeholder yet: %s", error)
+                return False
         except Exception as error:
-            logger.debug("Could not remove an abandoned processing placeholder: %s", error)
-            return False
+            # Forbidden, InvalidToken and anything else will not succeed on a
+            # later turn, so forget the entry instead of retrying forever.
+            logger.warning("Giving up on an abandoned placeholder: %s", error)
         return True
 
     def context_metadata_messages(self):
@@ -326,8 +356,9 @@ class SectorContext(CallbackContext):
         album_ids = [item.message_id for item in album or [] if type(getattr(item, "message_id", None)) is int]
         if len(album_ids) > 1:
             # Every item of an album, in photo order, so an edit of any of them
-            # (or a reaction target) can be matched to this entry.
-            additional_kwargs["telegram"]["album_message_ids"] = album_ids
+            # can be matched to this entry. Kept out of the "telegram" envelope:
+            # it is internal routing, not something the model should read.
+            additional_kwargs["album_message_ids"] = album_ids
         if images:
             additional_kwargs["images"] = images
         return HumanMessage(
@@ -637,6 +668,11 @@ class SectorContext(CallbackContext):
             warnings.append(f"SECTOR_AI_PROMPT_CACHE_TTL=1h only applies to OpenRouter; the cache backend is {backend}")
         if self.settings.prompt_cache_retention and backend != "openai":
             warnings.append(f"SECTOR_AI_PROMPT_CACHE_RETENTION only applies to OpenAI; the cache backend is {backend}")
+        if self.settings.prompt_cache_retention and ttl == "30m":
+            warnings.append(
+                "SECTOR_AI_PROMPT_CACHE_TTL=30m wins over SECTOR_AI_PROMPT_CACHE_RETENTION; "
+                "OpenAI accepts only one of the two, so retention is not sent"
+            )
         return warnings
 
     def cache_request_options(self, workload: str) -> dict:
@@ -648,13 +684,12 @@ class SectorContext(CallbackContext):
         key = f"{prefix}:{self._chat_id}:{self._message_thread_id}:{workload}"[:64]
         if backend == "openai":
             options = {"prompt_cache_key": key}
-            if self.settings.prompt_cache_retention:
-                options["prompt_cache_retention"] = self.settings.prompt_cache_retention
+            # OpenAI rejects a request that sets both lifetime fields, so the
+            # explicit TTL wins and retention is left out (warned at startup).
             if self.settings.prompt_cache_ttl == "30m":
-                options["prompt_cache_options"] = {
-                    "mode": "implicit",
-                    "ttl": self.settings.prompt_cache_ttl,
-                }
+                options["prompt_cache_options"] = {"mode": "implicit", "ttl": "30m"}
+            elif self.settings.prompt_cache_retention:
+                options["prompt_cache_retention"] = self.settings.prompt_cache_retention
             return options
         if backend == "openrouter":
             # Session affinity keeps a conversation on the provider holding the

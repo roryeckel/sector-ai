@@ -119,11 +119,7 @@ def edit_changes_message(update, context) -> bool:
     if version is None or context.is_processed(update):
         return False
     message = update.effective_message
-    if (
-        not version["text"]
-        and not message_photos(message)
-        and message.message_id not in context.conversation_data.get("ingested_messages", [])
-    ):
+    if not version["text"] and not message_photos(message) and not _in_history(context, message.message_id):
         # A textless edit of something never stored (a live location, a
         # sticker, an inline keyboard) changes nothing the transcript holds.
         # A stored message that lost its caption still counts.
@@ -152,6 +148,17 @@ async def _replace_changed_photo(context, message, images: list, album_ids: list
     if loaded:
         images[position] = loaded[0]
     return images
+
+
+def _in_history(context, message_id: int) -> bool:
+    """Whether the transcript still holds this message (or an album holding it)."""
+    for item in context.chat_message_history:
+        telegram = item.additional_kwargs.get("telegram", {})
+        if telegram.get("message_id") == message_id:
+            return True
+        if message_id in (item.additional_kwargs.get("album_message_ids") or []):
+            return True
+    return False
 
 
 def _record_edit_version(context, message_id: int, version: dict) -> None:
@@ -245,7 +252,7 @@ async def handle_message_edit(update, context) -> bool:
         original = item.additional_kwargs.get("telegram", {})
         if not isinstance(item, HumanMessage) or original.get("kind") == "chat_event":
             continue
-        album_ids = original.get("album_message_ids") or []
+        album_ids = item.additional_kwargs.get("album_message_ids") or []
         if original.get("message_id") != message_id and message_id not in album_ids:
             continue
         # An edit arriving late must not replace a newer version.
@@ -268,12 +275,10 @@ async def handle_message_edit(update, context) -> bool:
         event["previous_excerpt"] = item.content[:600]
         if images:
             # A caption edit keeps the photos (and any album) already stored.
-            telegram = {**replacement.additional_kwargs.get("telegram", {})}
+            extra = {**replacement.additional_kwargs, "images": images}
             if album_ids:
-                telegram["album_message_ids"] = album_ids
-            replacement = replacement.model_copy(
-                update={"additional_kwargs": {**replacement.additional_kwargs, "telegram": telegram, "images": images}}
-            )
+                extra["album_message_ids"] = album_ids
+            replacement = replacement.model_copy(update={"additional_kwargs": extra})
         context.chat_message_history[index] = replacement
         break
     event["original_in_recent_history"] = found

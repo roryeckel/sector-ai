@@ -271,7 +271,7 @@ Bot settings come from environment variables, an optional `.env` file in the wor
 | `SECTOR_AI_LLM_HEADERS` | `{}` | JSON object of extra HTTP headers. `SECTOR_AI_OLLAMA_HEADERS` is also accepted. |
 | `SECTOR_AI_PROMPT_CACHE_MODE` | `auto` | `auto` applies cache affinity only to recognized OpenAI/OpenRouter hosts. `off` disables it; `openai` and `openrouter` force a choice for an OpenAI-compatible provider. |
 | `SECTOR_AI_PROMPT_CACHE_KEY_PREFIX` | `sector-ai` | Stable prefix for request-local cache/session keys. Chat and forum topic IDs are appended. |
-| `SECTOR_AI_PROMPT_CACHE_RETENTION` | *empty* | OpenAI only, models before GPT-5.6: `in_memory` or `24h`. Not together with a TTL. |
+| `SECTOR_AI_PROMPT_CACHE_RETENTION` | *empty* | OpenAI only, models before GPT-5.6: `in_memory` or `24h`. If a TTL is also set, the TTL wins and a startup warning says so. |
 | `SECTOR_AI_PROMPT_CACHE_TTL` | *empty* | OpenAI (GPT-5.6+): `30m` for `prompt_cache_options`. OpenRouter: `1h` for Anthropic-style automatic caching. |
 | `SECTOR_AI_STREAM_USAGE` | `false` | Ask OpenAI-compatible servers to include usage in stream chunks. Leave off for older local servers that reject `stream_options`. |
 | `SECTOR_AI_AGENT_TOOLS_ENABLED` | `true` | Let a tool-capable chat model select tools autonomously. Explicit commands remain available when false. |

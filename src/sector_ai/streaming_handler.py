@@ -63,6 +63,9 @@ class LazyReply:
         If this reply already shows text, the notice is posted as a new message
         instead of replacing what the user is reading.
         """
+        if self.message is None and self.source is None:
+            # No chat to post into (a reply built without a source).
+            return False
         try:
             if self.message is not None and self.source is not None:
                 commit_or_stop(self.context)
@@ -223,14 +226,30 @@ async def handle_streaming_response(
             delivered_parts.append(text)
         return True
 
+    settled = False
+
     def settle() -> None:
         """Track a cursor only on the message whose final edit failed."""
+        nonlocal settled
+        settled = True
         if reply.message is None:
             return
         if final_edit_ok:
             context.settle_placeholder(reply.message)
         else:
             context.mark_placeholder_unsettled(reply.message)
+
+    async def strip_cursor() -> None:
+        """Take the cursor out of the preview with the text received so far."""
+        nonlocal final_edit_ok
+        if reply.message is None or final_edit_ok:
+            return
+        chunks = render_chunks(strip_internal_envelope(response + buffer), enabled=markdown_enabled)
+        if not chunks:
+            return
+        text, entities = chunks[0]
+        if await edit(text, telegram_entities(entities) if entities_ok else None):
+            final_edit_ok = True
 
     try:
         async for chunk in stream_generator:
@@ -305,15 +324,19 @@ async def handle_streaming_response(
             with contextlib.suppress(asyncio.CancelledError):
                 await update_task
         if reply.message is not None and reply.source is not None:
-            # Keep the partial text the user was reading, minus the cursor;
-            # the error follows as its own message.
-            await deliver_final()
+            if not final_edit_ok:
+                # Nothing complete is on screen yet: finish the partial text.
+                # A reply that was already delivered must never be sent again.
+                await deliver_final()
+            # Keep what the user was reading; the error follows as its own message.
             await reply.notify(error_message)
         elif await reply.notify(error_message) and reply.message is not None:
             # An already posted message: the notice replaced its preview.
             final_edit_ok = True
         settle()
-        return ""
+        # Save what is on screen, so the next turn neither repeats it nor
+        # claims the parts that never arrived.
+        return "\n".join(delivered_parts)
 
     finally:
         # A pending task here means the generator failed mid-stream; awaiting it
@@ -322,3 +345,15 @@ async def handle_streaming_response(
             update_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await update_task
+        if not settled:
+            # Cancelled or interrupted before the final delivery (a run
+            # timeout lands here). Without this the preview keeps its cursor
+            # and is never cleaned up.
+            try:
+                await asyncio.wait_for(strip_cursor(), timeout=5)
+            except asyncio.CancelledError:
+                settle()
+                raise
+            except Exception:
+                logger.warning("%s could not remove the cursor from its preview", log_prefix)
+            settle()

@@ -23,6 +23,7 @@ from . import debounce as debounce_turns
 from .autoreply import should_respond
 from .capabilities import builtin_tools
 from .chat_metadata import is_message_edit, message_metadata, utc_now
+from .errors import UserFacingError
 from .images import load_photos
 from .logging_utils import user_error_text
 from .mcp_tools import MCPRegistry
@@ -295,7 +296,7 @@ async def _run_turn(
             budget = await context.get_context_budget()
             estimate = context._estimate_token_count(await context._current_context_messages(), include_tools=True)
             if await context.prompt_exceeds(estimate, budget):
-                raise ValueError(
+                raise UserFacingError(
                     "Conversation and enabled tools exceed the model's context window. Reduce the tool allowlist or clear context."
                 )
             messages = context.get_templated_messages(tool_history=True).format_messages(
@@ -399,7 +400,7 @@ async def _run_turn(
                     tool = tools.get(call["name"])
                     try:
                         if tool is None:
-                            raise ValueError("This tool is not permitted in this conversation.")
+                            raise UserFacingError("This tool is not permitted in this conversation.")
                         # Disable JSON Schema's legacy remote-ref retrieval.
                         validator_for(tool.parameters)(tool.parameters, registry=Registry()).validate(call["args"])
                         # A tool may have side effects; from here the turn is no
@@ -425,7 +426,7 @@ async def _run_turn(
                         effect = context.conversation_data.pop("side_effect_started", None)
                         if isinstance(interrupted, dict) and interrupted.get("tool_call_id") == call["id"]:
                             result = interrupted["result"]
-                        elif tool is not None and tool.marks_side_effects and effect != call["id"]:
+                        elif tool is not None and tool.marks_side_effects and _effect_call(effect) != call["id"]:
                             # Still generating: nothing was sent, so this is an
                             # ordinary failure, not an uncertain side effect.
                             result = {
@@ -573,6 +574,11 @@ class _WithMessage:
         return getattr(self._update, name)
 
 
+def _effect_call(effect) -> str | None:
+    """The tool call whose side effect started, if one did."""
+    return effect.get("call_id") if isinstance(effect, dict) else None
+
+
 def _discard_pending(context, message) -> None:
     """Remove a tool request whose tools never started; it had no effect."""
     history = context.chat_message_history
@@ -677,7 +683,7 @@ def _close_pending(context, message):
             if interrupted is not None and interrupted["tool_call_id"] == call["id"]:
                 result = interrupted["result"]
                 interrupted = None
-            elif call["id"] in started and call["id"] in marked and effect != call["id"]:
+            elif call["id"] in started and call["id"] in marked and _effect_call(effect) != call["id"]:
                 result = {
                     "status": "not_executed",
                     "error": "Run interrupted while this tool was still generating; nothing was sent. "

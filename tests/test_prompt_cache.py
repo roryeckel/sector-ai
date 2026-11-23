@@ -137,13 +137,36 @@ def test_cache_controls_can_be_forced_or_disabled(make_context, make_settings):
     assert disabled.cache_request_options("agent") == {}
 
 
-def test_both_openai_cache_lifetimes_or_a_responses_only_ttl_are_rejected(make_settings):
+def test_a_responses_only_ttl_is_rejected(make_settings):
     from pydantic import ValidationError
 
-    with pytest.raises(ValidationError, match="cannot both be set"):
-        make_settings(prompt_cache_retention="24h", prompt_cache_ttl="30m")
     with pytest.raises(ValidationError):
         make_settings(prompt_cache_ttl="12h")
+
+
+def test_the_ttl_wins_when_both_openai_lifetimes_are_set(make_context, make_settings):
+    # OpenAI rejects a request with both, and a self-hosted endpoint that never
+    # sends either must still be allowed to configure them.
+    context = make_context(
+        "unused",
+        settings=make_settings(
+            llm_provider="openai",
+            openai_base_url="https://api.openai.com/v1",
+            prompt_cache_ttl="30m",
+            prompt_cache_retention="24h",
+        ),
+    )
+    options = context.cache_request_options("agent")
+
+    assert options["prompt_cache_options"] == {"mode": "implicit", "ttl": "30m"}
+    assert "prompt_cache_retention" not in options
+    assert any("wins over" in warning for warning in context.cache_setting_warnings())
+
+
+def test_both_lifetimes_are_accepted_where_nothing_is_sent(make_settings):
+    settings = make_settings(llm_provider="ollama", prompt_cache_ttl="30m", prompt_cache_retention="24h")
+
+    assert settings.prompt_cache_ttl == "30m"
 
 
 def test_a_ttl_the_backend_ignores_is_reported(make_context, make_settings):

@@ -44,6 +44,9 @@ class Turn:
     done: bool = False
     #: Its message is in history (or it never will be: a duplicate, or it left).
     stored: bool = False
+    #: It stores its own message. An edit restart does not: the edit handler
+    #: has already written the edited text into history.
+    ingests: bool = True
     task: asyncio.Task | None = field(default=None, repr=False)
     #: Older turns this one took over.
     replaced: list["Turn"] = field(default_factory=list, repr=False)
@@ -146,6 +149,7 @@ def register(update, context, *, photos=None, restarts: int = 0, edited: bool = 
         sender_id=_sender_id(update.effective_message),
         sequence=sequence,
         restarts=restarts,
+        ingests=not edited,
     )
     turns.append(turn)
     return turn
@@ -235,8 +239,12 @@ def turn_for_message(context, message_id: int) -> Turn | None:
 
 
 def unstored_turn_for_message(context, message_id: int) -> Turn | None:
-    """A turn, superseded or not, that will still store ``message_id``."""
+    """A turn, superseded or not, that will still store ``message_id``.
+
+    A turn that does not ingest (an edit restart) is excluded: handing it an
+    edit would lose it, because it never reads ``turn.edits``.
+    """
     for turn in context.conversation_data.get(TURNS, []):
-        if not turn.stored and message_id in turn.message_ids:
+        if not turn.stored and turn.ingests and message_id in turn.message_ids:
             return turn
     return None

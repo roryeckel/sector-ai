@@ -879,7 +879,7 @@ async def test_a_tool_timing_out_after_its_send_started_stays_uncertain(agent_co
     context = agent_context(tool_call("generate_svg", identifier="svg-1"), AIMessage(content="Unsure."))
 
     async def sending(arguments):
-        context.conversation_data["side_effect_started"] = context.conversation_data["active_tool_call_id"]
+        context.conversation_data["side_effect_started"] = {"call_id": context.conversation_data["active_tool_call_id"]}
         await asyncio.sleep(10)
 
     spec = AgentTool("generate_svg", "svg", {"type": "object"}, sending, 0.05, marks_side_effects=True)

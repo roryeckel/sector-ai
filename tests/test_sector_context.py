@@ -909,7 +909,7 @@ def test_estimate_is_cautious_by_script_without_failing_ordinary_chats(make_cont
     assert estimate("🔥" * 100) == 300
     # ...but not fourfold: a 2,000-character Russian message (about 1-2k real
     # tokens) fits an 8k window instead of failing the turn.
-    assert estimate("Привет" * 333) == 1998
+    assert estimate("Привет" * 333) == 2498
     assert estimate("hello " * 100) == 150
 
 
@@ -1058,3 +1058,22 @@ def test_uncapped_photos_need_compaction(make_settings):
 
     with _pytest.raises(ValidationError, match="never released"):
         make_settings(image_max_attached=0, compaction_enabled=False)
+
+
+def test_script_weights_cover_scripts_that_tokenize_poorly(make_context):
+    context = make_context("unused")
+
+    def estimate(text):
+        return context._estimate_token_count([HumanMessage(content=text)])
+
+    assert estimate("Α" * 100) == 200  # Greek uppercase
+    assert estimate("ກ" * 100) == 250  # Lao: byte fallback
+    assert estimate("ע" * 100) == 175  # Hebrew
+
+
+def test_abandoned_placeholders_are_bounded(make_context):
+    context = make_context()
+    for message_id in range(40):
+        context.mark_placeholder_unsettled(SimpleNamespace(message_id=message_id, chat_id=1))
+
+    assert len(context.conversation_data["abandoned_placeholders"]) == 16

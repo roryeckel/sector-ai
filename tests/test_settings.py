@@ -258,3 +258,11 @@ def test_unknown_variables_are_ignored(monkeypatch):
     monkeypatch.setenv("SECTOR_AI_NOT_A_SETTING", "whatever")
 
     assert env_only().default_model == "llama3.2-vision:11b-instruct-fp16"
+
+
+def test_uncapped_photos_need_compaction_only_in_native_mode(make_settings):
+    settings = make_settings(
+        image_max_attached=0, compaction_enabled=False, default_model_vision=False, vision_model="eyes"
+    )
+
+    assert settings.image_max_attached == 0

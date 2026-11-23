@@ -71,11 +71,21 @@ def result_content(result: dict, settings) -> str:
     if len(text) <= limit:
         return text
     # Keep the short fields that say what happened (the delivery note, the
-    # Telegram IDs, the error) intact, and cut only the bulky rest.
-    kept = {key: redacted[key] for key in RECEIPT_KEYS if isinstance(redacted, dict) and key in redacted}
-    if len(json.dumps(kept, ensure_ascii=False)) > limit // 2:
-        kept = {}
-    content = {"status": redacted.get("status", "success"), "truncated": True, **kept, "result": text[: limit // 2]}
+    # Telegram IDs, the error) intact, and cut only the bulky rest. They are
+    # added in priority order and each one only if the budget allows, so a
+    # small limit keeps the note instead of dropping every field.
+    budget = limit // 2
+    kept = {}
+    for key in RECEIPT_KEYS:
+        if not isinstance(redacted, dict) or key not in redacted or key == "status":
+            continue
+        value = redacted[key]
+        if key == "telegram" and isinstance(value, dict):
+            value = {name: text[:120] if isinstance(text, str) else text for name, text in value.items()}
+        if len(json.dumps({**kept, key: value}, ensure_ascii=False)) > budget:
+            continue
+        kept[key] = value
+    content = {"status": redacted.get("status", "success"), "truncated": True, **kept, "result": text[:budget]}
     text = json.dumps(content, ensure_ascii=False)
     # Escaping can expand arbitrary external strings to six characters each.
     while len(text) > limit and content["result"]:

@@ -465,3 +465,22 @@ async def test_a_redelivery_of_a_superseded_unstored_update_is_ignored(make_cont
     assert debounce.register(update, context) is None
     # An edit restart of that message may still register.
     assert debounce.register(update, context, edited=True) is not None
+
+
+async def test_a_second_edit_during_an_edit_restart_is_not_lost(make_context, make_update, recording_message):
+    # The replacement turn was registered (ingest=False) but has not stored
+    # anything; a second edit must go through the edit handler, not turn.edits.
+    context = make_context()
+    original = make_update(text="version zero", message_id=10)
+    context.bind_update(original)
+    context.save_user_message(original.message)
+    replacement = debounce.register(original, context, edited=True)
+    second = recording_message(text="version two")
+    second.message_id = 10
+
+    await handle_edited_message(edit_update(second, update_id=502, like=original), context)
+
+    assert replacement.edits == {}
+    assert humans(context)[0] == "testuser: version two"
+    # The original text survives only as the event's "previous excerpt".
+    assert not any(content.startswith("testuser: version zero") for content in humans(context))

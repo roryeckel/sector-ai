@@ -108,9 +108,11 @@ async def test_handle_chat_reports_setup_failure(make_context, make_update, monk
 
 
 async def test_a_deliberate_refusal_is_shown_as_is(make_context, make_update, monkeypatch):
+    from sector_ai.errors import UserFacingError
+
     context = make_context("unused")
     monkeypatch.setattr(
-        context, "get_system_template_dict", AsyncMock(side_effect=ValueError("Conversation exceeds the window."))
+        context, "get_system_template_dict", AsyncMock(side_effect=UserFacingError("Conversation exceeds the window."))
     )
     update = make_update(text="/chat question")
 

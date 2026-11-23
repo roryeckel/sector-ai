@@ -225,22 +225,12 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _bounded_photo_memory(self) -> "Settings":
-        # Without compaction nothing else ever detaches photos, so every photo
-        # in up to compaction_max_messages messages would stay in memory.
-        if self.image_max_attached == 0 and not self.compaction_enabled:
+        # Only native mode keeps pixels: describe mode replaces them with text
+        # and off mode stores a marker, so neither can grow without a cap.
+        if self.image_max_attached == 0 and not self.compaction_enabled and self.default_model_vision:
             raise ValueError(
-                "SECTOR_AI_IMAGE_MAX_ATTACHED=0 (no cap) needs compaction enabled; "
+                "SECTOR_AI_IMAGE_MAX_ATTACHED=0 (no cap) needs compaction enabled in native photo mode; "
                 "otherwise attached photos are never released"
-            )
-        return self
-
-    @model_validator(mode="after")
-    def _one_openai_cache_lifetime(self) -> "Settings":
-        # OpenAI rejects a request that sets both lifetime fields.
-        if self.prompt_cache_retention and self.prompt_cache_ttl == "30m":
-            raise ValueError(
-                "SECTOR_AI_PROMPT_CACHE_RETENTION and SECTOR_AI_PROMPT_CACHE_TTL=30m cannot both be set; "
-                "OpenAI rejects requests with both. Use TTL for GPT-5.6 and later, retention for earlier models."
             )
         return self
 

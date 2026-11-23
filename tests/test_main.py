@@ -132,12 +132,14 @@ async def test_handle_message_respects_autoreply_decision(make_context, make_upd
 
 async def test_error_handler_reports_to_message(make_context, make_update):
     context = make_context("unused")
-    context.error = ValueError("boom")
+    context.error = RuntimeError("connect failed for http://10.0.0.5:11434/v1")
     update = make_update(text="hello")
 
     await error_handler(update, context)
 
-    assert update.message.texts("reply_text") == ["boom"]
+    shown = update.message.texts("reply_text")[0]
+    assert shown.startswith("Something went wrong (reference ")
+    assert "10.0.0.5" not in shown
     assert list(context.chat_message_history) == []
 
 
@@ -159,7 +161,8 @@ async def test_error_handler_reports_to_callback_query(make_context):
 
     await error_handler(update, context)
 
-    query.answer.assert_awaited_once_with("boom")
+    shown = query.answer.await_args.args[0]
+    assert shown.startswith("Something went wrong (reference ")
 
 
 async def test_error_handler_swallows_bad_request(make_context, make_update):

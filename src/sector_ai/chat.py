@@ -4,6 +4,7 @@ import logging
 from telegram import Update
 from telegram.error import NetworkError
 
+from .errors import UserFacingError
 from .logging_utils import user_error_text
 from .sector_context import SectorContext
 from .streaming_handler import LazyReply, handle_streaming_response
@@ -51,7 +52,7 @@ async def stream_chat(
                 await asyncio.sleep(5.0 * (attempt + 1))
         budget = await context.get_context_budget()
         if await context.prompt_exceeds(context._estimate_token_count(messages), budget):
-            raise ValueError("Conversation exceeds the model's context window. Compact or clear context.")
+            raise UserFacingError("Conversation exceeds the model's context window. Compact or clear context.")
         logger.info("Respond Prompt: %s", messages)
         stream_generator = context.bind_cache(context.bot_llm, "chat").astream(messages)
         # Delivery failures are handled inside and never re-run the model.

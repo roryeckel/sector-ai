@@ -1,5 +1,6 @@
 """Tests for the streaming message updater."""
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -551,3 +552,98 @@ async def test_a_notice_that_telegram_rejects_never_raises(make_context, recordi
     reply = LazyReply(context, recording_message(fail_times=1))
 
     assert await reply.notify("Error") is False
+
+
+async def test_a_cancelled_turn_strips_the_cursor_instead_of_leaving_it(make_context, recording_message, fast_settings):
+    # A run timeout cancels mid-stream. The preview must not keep the cursor.
+    context = make_context(settings=fast_settings)
+    message = recording_message()
+    first_chunk = asyncio.Event()
+
+    async def endless():
+        yield SimpleNamespace(content="alpha ")
+        first_chunk.set()
+        await asyncio.Event().wait()
+
+    task = asyncio.create_task(handle_streaming_response(context, message, endless(), "Chat"))
+    await asyncio.wait_for(first_chunk.wait(), timeout=5)
+    while not message.texts("edit_text"):
+        await asyncio.sleep(0.005)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    # The preview carried the cursor; the last edit removed it again.
+    assert message.shown()
+    assert context.settings.streaming_cursor in message.shown()[0]
+    assert context.settings.streaming_cursor not in message.shown()[-1]
+    context.finish_placeholder()
+    assert "pending_placeholder" not in context.conversation_data
+
+
+async def test_an_error_after_delivery_never_resends_the_reply(
+    make_context, recording_message, quiet_settings, monkeypatch
+):
+    context = make_context(settings=quiet_settings)
+    context.bot.send_message = AsyncMock(return_value=SimpleNamespace(message_id=7))
+    source = recording_message()
+    reply = LazyReply(context, source)
+    monkeypatch.setattr(
+        "sector_ai.streaming_handler.record_usage", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("usage"))
+    )
+
+    chunk = AIMessageChunk(
+        content="x" * 5000,
+        usage_metadata={"input_tokens": 10, "output_tokens": 1, "total_tokens": 11},
+    )
+
+    response = await handle_streaming_response(context, reply, aiter_chunks([chunk]), "Chat")
+
+    assert context.bot.send_message.await_count == 1
+    assert response.replace("\n", "") == "x" * 5000
+    assert "Something went wrong (reference " in source.texts("reply_text")[-1]
+
+
+async def test_an_error_with_visible_text_returns_what_is_on_screen(make_context, recording_message, fast_settings):
+    context = make_context(settings=fast_settings)
+    source = recording_message()
+
+    async def exploding():
+        yield SimpleNamespace(content="alpha beta")
+        # Let the preview reach the chat, then fail mid-stream.
+        while not source.texts("reply_text"):
+            await asyncio.sleep(0.001)
+        raise RuntimeError("boom")
+
+    response = await handle_streaming_response(context, LazyReply(context, source), exploding(), "Chat")
+
+    assert response == "alpha beta"
+    # The preview's cursor is replaced by the final partial text.
+    assert source.texts("edit_text")[-1] == "alpha beta"
+    assert "Something went wrong (reference " in source.texts("reply_text")[-1]
+
+
+async def test_a_permanent_delete_failure_is_not_retried_forever(make_context):
+    from telegram.error import Forbidden
+
+    context = make_context()
+    context.conversation_data["pending_placeholder"] = {"chat_id": 1, "message_id": 42}
+    context.conversation_data["placeholder_unsettled"] = 42
+    context.bot.delete_message = AsyncMock(side_effect=Forbidden("no rights"))
+
+    for _ in range(3):
+        await context.remove_pending_placeholder()
+
+    assert context.bot.delete_message.await_count == 1
+    assert "pending_placeholder" not in context.conversation_data
+
+
+async def test_a_transient_delete_failure_is_retried_on_the_next_turn(make_context):
+    from telegram.error import NetworkError
+
+    context = make_context()
+    context.conversation_data["pending_placeholder"] = {"chat_id": 1, "message_id": 42}
+    context.bot.delete_message = AsyncMock(side_effect=NetworkError("502"))
+
+    await context.remove_pending_placeholder()
+    assert context.conversation_data["pending_placeholder"]["message_id"] == 42

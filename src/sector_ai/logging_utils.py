@@ -113,15 +113,16 @@ GENERIC_ERROR = "Something went wrong"
 def user_error_text(error: BaseException, settings: Settings | None, *, log_traceback: bool = True) -> str:
     """What a chat participant sees for ``error``.
 
-    A plain ``ValueError`` is what this bot raises on purpose to explain a
-    refusal ("exceeds the model's context window"), so its text is shown,
-    redacted. Anything else (a backend, network or library failure) can name
-    internal hosts, URLs or file paths, so the chat gets a short reference and
-    the full error is logged under it.
+    Only :class:`UserFacingError` is written for a chat participant, so its text
+    is shown, redacted. Anything else, including a plain ``ValueError`` from a
+    library, can name internal hosts, URLs or file paths, so the chat gets a
+    short reference and the full error is logged under it.
     """
+    from .errors import UserFacingError
+
     if isinstance(error, TimeoutError):
         return "The request timed out."
-    if type(error) is ValueError and str(error).strip():
+    if isinstance(error, UserFacingError) and str(error).strip():
         return redact_for_user(str(error), settings)
     reference = secrets_module.token_hex(3)
     logger.error(

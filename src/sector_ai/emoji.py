@@ -14,6 +14,7 @@ from .chat_metadata import (
     strip_internal_envelope,
     with_context,
 )
+from .errors import UserFacingError
 from .history import plain_history, record_content_command
 from .message_text import message_text
 from .sector_context import SectorContext
@@ -78,7 +79,7 @@ async def conversation_messages(context, template, variables, current_message):
     while len(history) > 1 and context._estimate_token_count([*prefix, *history, *shared, *suffix]) > budget * 0.65:
         history.pop(0)
     if context._estimate_token_count([*prefix, *history, *shared, *suffix]) > budget * 0.8:
-        raise ValueError("The recent conversation is too large to turn into emojis.")
+        raise UserFacingError("The recent conversation is too large to turn into emojis.")
     return [*prefix, *history, *shared, *suffix]
 
 

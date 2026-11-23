@@ -454,3 +454,14 @@ async def test_textless_edits_of_unstored_messages_add_nothing(make_context):
         assert await handle_message_edit(location_edit(update_id), context) is False
 
     assert list(context.chat_message_history) == []
+
+
+async def test_a_caption_removal_still_applies_after_the_id_is_evicted(make_context):
+    context = make_context()
+    original = text_update("old caption")
+    context.bind_update(original)
+    context.save_user_message(original.message)
+    context.conversation_data["ingested_messages"] = []  # older than the cap
+
+    assert await handle_message_edit(text_update(None, edited=True), context) is True
+    assert "old caption" not in context.chat_message_history[0].content

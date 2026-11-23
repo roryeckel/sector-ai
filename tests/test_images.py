@@ -543,3 +543,14 @@ async def test_a_replaced_photo_is_reloaded(make_context, make_update, make_phot
     assert image["id"] == "new"
     assert image["data"] == encoded(b"new")
     assert '"photo_replaced": true' in context.chat_message_history[-1].content
+
+
+def test_album_ids_are_not_shown_to_the_model(make_context, make_update, make_photo):
+    context = make_context()
+    first = make_update(text=None, caption="both", photos=[make_photo(file_unique_id="a")], message_id=10)
+    second = make_update(text=None, photos=[make_photo(file_unique_id="b")], message_id=11)
+    context.save_user_message(first.message, album=[first.message, second.message], images=[])
+
+    entry = context.chat_message_history[0]
+    assert entry.additional_kwargs["album_message_ids"] == [10, 11]
+    assert "album_message_ids" not in render_metadata(entry).content

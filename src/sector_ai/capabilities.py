@@ -21,6 +21,7 @@ from .chat_metadata import (
     render_prompt_message,
     strip_internal_envelope,
 )
+from .errors import UserFacingError
 from .history import plain_history
 from .logging_utils import redact_for_user
 from .message_text import message_refused, message_text
@@ -158,7 +159,7 @@ async def generate_output(kind: str, prompt: str, context, model, *, topic=False
         retained.pop(0)
     messages = [*prefix, *retained, *shared, *suffix]
     if context._estimate_token_count(messages) > budget * 0.8:
-        raise ValueError("The generation request is too large for the model's context window.")
+        raise UserFacingError("The generation request is too large for the model's context window.")
     workload = f"generate_{kind}" + ("_topic" if topic else "")
     generator = model.bind(response_format={"type": "json_object"}) if topic else model
     generator = context.bind_cache(generator, workload)
@@ -166,14 +167,14 @@ async def generate_output(kind: str, prompt: str, context, model, *, topic=False
         response = await generator.ainvoke(messages)
         record_usage(context, workload, response)
         if message_refused(response):
-            raise ValueError(message_text(response) or "The model refused the request.")
+            raise UserFacingError(message_text(response) or "The model refused the request.")
         text = strip_internal_envelope(message_text(response))
         # The poll parser handles its own fences (```json included).
         source = text.strip() if kind == "poll" else strip_fence(text)
         if not source:
-            raise ValueError("The model returned an empty response.")
+            raise UserFacingError("The model returned an empty response.")
         if len(source) > context.settings.tool_result_max_chars // 2:
-            raise ValueError("Generated output exceeds the configured tool result size limit.")
+            raise UserFacingError("Generated output exceeds the configured tool result size limit.")
         if kind == "poll":
             parsed = parser.parse(source)
             if topic:
@@ -190,11 +191,11 @@ async def generate_output(kind: str, prompt: str, context, model, *, topic=False
             return GeneratedOutput(kind, {"svg": source}, prompt, png)
         except Exception as error:
             if attempt == 2:
-                raise ValueError("Failed to generate valid SVG snippet.") from error
+                raise UserFacingError("Failed to generate valid SVG snippet.") from error
             # Show what failed, so the correction has something to correct.
             messages.append(AIMessage(content=source[:8000]))
             messages.append(HumanMessage(content=f"That SVG is invalid: {error}. Return the corrected SVG only."))
-    raise ValueError("Generation failed")
+    raise UserFacingError("Generation failed")
 
 
 def telegram_references(message) -> dict:
@@ -223,7 +224,8 @@ async def deliver_output(output: GeneratedOutput, update, context) -> dict:
     """One send attempt. A network error can mean Telegram accepted the send."""
     result = {"kind": output.kind, **output.content, "status": "delivery_pending"}
     # From here a timeout may mean Telegram got it; before, nothing was sent.
-    context.conversation_data["side_effect_started"] = context.conversation_data.get("active_tool_call_id")
+    # The call ID is stored explicitly: the active one can be cleared first.
+    context.conversation_data["side_effect_started"] = {"call_id": context.conversation_data.get("active_tool_call_id")}
     try:
         message = update.effective_message
         if output.kind == "svg":
@@ -274,6 +276,8 @@ async def deliver_output(output: GeneratedOutput, update, context) -> dict:
             result["telegram"] = telegram_references(sent)
         except Exception:
             logger.exception("Recording a delivered %s failed", output.kind)
+    # The outcome is known now (a cancellation skips this on purpose).
+    context.conversation_data.pop("side_effect_started", None)
     return result
 
 

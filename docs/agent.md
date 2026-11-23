@@ -296,9 +296,10 @@ Cache affinity is backend-specific:
   applies to models before GPT-5.6. `SECTOR_AI_PROMPT_CACHE_TTL` accepts `30m`
   for OpenAI (`prompt_cache_options`, GPT-5.6 and later; the bot uses Chat
   Completions, where `12h` is not accepted) and `1h` for OpenRouter's
-  Anthropic-style automatic cache. OpenAI rejects a request with both fields,
-  so setting both is a startup error. A value the resolved backend would ignore
-  is logged at startup. Empty defaults let the provider choose.
+  Anthropic-style automatic cache. OpenAI rejects a request with both lifetime
+  fields, so when both are set `30m` wins and retention is not sent; a startup
+  warning says so. A value the resolved backend would ignore is logged at
+  startup too. Empty defaults let the provider choose.
 - Prompt caching never replaces the correctness rules above. An uncertain side
   effect still blocks further tools, and `compaction` or a message edit may
   legitimately invalidate an earlier prefix.
@@ -450,11 +451,17 @@ what history records. Errors after text is visible are posted as a separate
 message instead of overwriting the answer.
 
 When a turn fails, the chat sees the bot's own explanation for deliberate
-refusals (for example "Conversation exceeds the model's context window"), and
-otherwise "Something went wrong (reference a1b2c3)". The full error and
-traceback are logged under that reference, so backend hostnames, URLs and file
-paths never reach the chat. The bot never replies with an error under a service
-message such as a member join.
+refusals (`UserFacingError`, for example "Conversation exceeds the model's
+context window"), and otherwise "Something went wrong (reference a1b2c3)". A
+plain `ValueError` from a library counts as the latter, so its text cannot leak
+a host, URL or path; the full error and traceback are logged under the
+reference. The bot never replies with an error under a service message such as
+a member join.
+
+A turn cancelled mid-stream (a run timeout, for example) removes the streaming
+cursor from the text it already showed and keeps that text as the reply, then
+reports the failure separately. Only a message whose cursor could not be
+removed is deleted at the start of the next turn.
 
 The first send of a reply is retried after a network timeout. Telegram cannot
 say whether a timed-out send arrived, so in rare cases this posts a duplicate
