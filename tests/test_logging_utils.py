@@ -47,6 +47,22 @@ def test_redacts_the_token_in_a_request_url():
     assert redact_token(text, TOKEN) == "HTTP Request: POST https://api.telegram.org/bot<redacted>/getMe"
 
 
+def test_redacts_a_percent_encoded_token_in_a_file_download_url():
+    # httpx logs file downloads with the colon encoded, which slipped past the
+    # plain pattern and leaked a real token into a log.
+    encoded = TOKEN.replace(":", "%3A")
+    text = f'HTTP Request: GET https://api.telegram.org/file/bot{encoded}/photos/file_1.jpg "HTTP/1.1 200 OK"'
+
+    assert redact_token(text, TOKEN) == (
+        'HTTP Request: GET https://api.telegram.org/file/bot<redacted>/photos/file_1.jpg "HTTP/1.1 200 OK"'
+    )
+    assert redact_token(f"bot{OTHER_TOKEN.replace(':', '%3a')}/x", TOKEN) == "bot<redacted>/x"
+
+
+def test_redacts_a_percent_encoded_configured_secret():
+    assert redact_secrets("key=a%2Fb%3Ac", ["a/b:c"]) == "key=<redacted>"
+
+
 def test_redacts_the_bot_repr():
     assert redact_token(f"Bot[token={TOKEN}]", TOKEN) == "Bot[token=<redacted>]"
 

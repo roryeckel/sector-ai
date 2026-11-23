@@ -21,6 +21,7 @@ import logging
 import re
 import secrets as secrets_module
 from collections.abc import Iterable
+from urllib.parse import quote
 
 from .settings import Settings
 
@@ -28,7 +29,9 @@ LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 
 # A Telegram token is "<bot id>:<35 characters>". Thirty is a low enough floor to
 # catch a pasted URL while staying far away from ordinary prose.
-TOKEN_IN_URL = re.compile(r"bot\d+:[A-Za-z0-9_-]{30,}")
+#: File downloads put the token in the URL path percent-encoded ("%3A" for the
+#: colon), and httpx logs that URL as is, so both forms must match.
+TOKEN_IN_URL = re.compile(r"bot\d+(?::|%3A)[A-Za-z0-9_-]{30,}", re.IGNORECASE)
 
 # Credentials registered after startup, kept for the process lifetime so a
 # rotated key does not make the previous one loggable again.
@@ -73,7 +76,9 @@ def redact_secrets(text: str, secrets: Iterable[str]) -> str:
     # rest of the longer credential visible.
     for secret in sorted(secrets, key=len, reverse=True):
         if secret:
-            text = text.replace(secret, "<redacted>")
+            # A credential inside a URL may be percent-encoded.
+            for form in {secret, quote(secret, safe=""), quote(secret)}:
+                text = text.replace(form, "<redacted>")
     return text
 
 
