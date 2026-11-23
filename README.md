@@ -258,6 +258,7 @@ Bot settings come from environment variables, an optional `.env` file in the wor
 | `SECTOR_AI_IMAGE_MAX_ATTACHED` | `32` | Cap on attached photos per request (`0` for none). Exceeding it detaches older photos down to the history limit in one step. |
 | `SECTOR_AI_IMAGE_PATCH_PX` | `28` | Pixels per image token used by the local token estimate. |
 | `SECTOR_AI_ALBUM_WAIT` | `1.5` | Seconds to collect an album before answering it as one turn. |
+| `SECTOR_AI_DEBOUNCE_MAX_RESTARTS` | `3` | How many times a newer relevant message, or an edit, may restart a turn that has not replied yet (`0` disables debouncing). |
 | `SECTOR_AI_ADMIN_USERNAMES` | `ex0dus` | Comma separated usernames allowed to use admin commands. |
 | `SECTOR_AI_DEFAULT_SVG_SIZE` | `250` | Base size for `/svg`; the rendered PNG is twice this. |
 | `SECTOR_AI_STREAMING_CURSOR` | `🦙` | Cursor shown while a reply streams. |

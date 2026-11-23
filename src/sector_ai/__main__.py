@@ -8,7 +8,7 @@ from dotenv import dotenv_values
 from pydantic import ValidationError
 from pydantic_settings import SettingsError
 from telegram import Update
-from telegram.error import BadRequest
+from telegram.error import TelegramError
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -32,7 +32,7 @@ from .chat_events import (
     MESSAGE_EDIT_FILTER,
     handle_bot_membership,
     handle_chat_event,
-    handle_message_edit,
+    handle_edited_message,
     handle_poll_answer,
     handle_poll_result,
 )
@@ -70,7 +70,7 @@ async def start_cmd(update: Update, context: SectorContext) -> None:
 
 # Message handler for non-command messages
 async def handle_message(update: Update, context: SectorContext) -> None:
-    await run_agent(update, context)
+    await run_agent(update, context, debounce=True)
 
 
 # Error handler
@@ -86,7 +86,9 @@ async def error_handler(update: Update, context: SectorContext) -> None:
             await update.message.reply_text(error_str)
         elif update and update.callback_query:
             await update.callback_query.answer(error_str)
-    except BadRequest:
+    except TelegramError:
+        # The original error is already logged. A failed error reply, often
+        # flood control, must not raise another uncaught error.
         pass
 
 
@@ -202,7 +204,10 @@ def main(argv: list[str] | None = None) -> None:
     # Add command handlers
     # The first matching handler wins within this group. Edits must be captured
     # before every command (including admin controls) and before photo handling.
-    application.add_handler(MessageHandler(MESSAGE_EDIT_FILTER, handle_message_edit))
+    # Edits, text and photos run concurrently (block=False) so a newer message
+    # can supersede a turn that has not replied yet. Each turn still holds the
+    # per-conversation lock, and controls/commands take it too.
+    application.add_handler(MessageHandler(MESSAGE_EDIT_FILTER, handle_edited_message, block=False))
     application.add_handler(CommandHandler("start", start_cmd))
     application.add_handler(CommandHandler("chat", chat_cmd))
     application.add_handler(CommandHandler("summarize", summarize_cmd))
@@ -225,9 +230,9 @@ def main(argv: list[str] | None = None) -> None:
     application.add_handler(CommandHandler("autoreply", autoreply_cmd))
 
     # Add message handler
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message, block=False))
     # Photos join the same agent turn as text; albums become one turn.
-    application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    application.add_handler(MessageHandler(filters.PHOTO, handle_photo, block=False))
     application.add_handler(MessageHandler(CHAT_EVENT_FILTER, handle_chat_event))
     application.add_handler(PollHandler(handle_poll_result))
     application.add_handler(PollAnswerHandler(handle_poll_answer))

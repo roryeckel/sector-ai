@@ -105,6 +105,8 @@ class SectorContext(CallbackContext):
         self._request_model = None
         self._request_model_name = None
         self._context_time = None
+        # The debounced turn this context is running, if any.
+        self._turn = None
 
     def bind_update(self, update) -> None:
         thread = getattr(update.effective_message, "message_thread_id", None)
@@ -133,6 +135,11 @@ class SectorContext(CallbackContext):
         """Track the current processing placeholder so a failed turn can clean it."""
         message_id = getattr(message, "message_id", None)
         if type(message_id) is int and type(self._chat_id) is int:
+            previous = self.conversation_data.get("pending_placeholder")
+            if self.conversation_data.get("placeholder_unsettled") and isinstance(previous, dict):
+                # An earlier reply in this turn still shows a cursor. A later
+                # reply must not take over its slot and forget it.
+                self.conversation_data.setdefault("abandoned_placeholders", []).append(previous)
             self.conversation_data["pending_placeholder"] = {
                 "message_id": message_id,
                 "chat_id": self._chat_id,
@@ -159,15 +166,27 @@ class SectorContext(CallbackContext):
         self.conversation_data.pop("placeholder_unsettled", None)
 
     async def remove_pending_placeholder(self) -> None:
-        """Remove a placeholder abandoned by an earlier failed delivery."""
+        """Remove placeholders abandoned by earlier failed deliveries."""
+        abandoned = self.conversation_data.get("abandoned_placeholders") or []
+        kept = [item for item in abandoned if not await self._delete_placeholder(item)]
+        if kept:
+            self.conversation_data["abandoned_placeholders"] = kept
+        else:
+            self.conversation_data.pop("abandoned_placeholders", None)
         pending = self.conversation_data.get("pending_placeholder")
         if not isinstance(pending, dict):
             return
+        if await self._delete_placeholder(pending):
+            self.clear_pending_placeholder()
+
+    async def _delete_placeholder(self, pending) -> bool:
+        """Delete one placeholder; False only when it is worth trying again later."""
+        if not isinstance(pending, dict):
+            return True
         message_id = pending.get("message_id")
         chat_id = pending.get("chat_id")
         if type(message_id) is not int or type(chat_id) is not int:
-            self.clear_pending_placeholder()
-            return
+            return True
         try:
             await self.bot.delete_message(chat_id=chat_id, message_id=message_id)
             logger.info("Removed an abandoned processing placeholder")
@@ -176,8 +195,8 @@ class SectorContext(CallbackContext):
             pass
         except Exception as error:
             logger.debug("Could not remove an abandoned processing placeholder: %s", error)
-            return
-        self.clear_pending_placeholder()
+            return False
+        return True
 
     def context_metadata_messages(self):
         """The static trust note and the volatile snapshot, in that order."""
@@ -272,16 +291,37 @@ class SectorContext(CallbackContext):
     def conversation_lock(self) -> asyncio.Lock:
         return self.conversation_data.setdefault("lock", asyncio.Lock())
 
-    def accept_update(self, update) -> bool:
-        """Deduplicate known Telegram updates, including ones with uncertain sends."""
+    @staticmethod
+    def _update_key(update):
         key = getattr(update, "update_id", None)
         if type(key) is int:
-            key = ("update", key)
-        else:
-            key = getattr(update.effective_message, "message_id", None)
-            if type(key) is not int:
-                return True
-            key = ("message", key)
+            return ("update", key)
+        key = getattr(update.effective_message, "message_id", None)
+        return ("message", key) if type(key) is int else None
+
+    def is_processed(self, update) -> bool:
+        """Whether ``accept_update`` already took this update, without recording it."""
+        key = self._update_key(update)
+        return key is not None and key in self.conversation_data.get("processed_updates", [])
+
+    def remember_sent(self, message) -> None:
+        """Record a message the bot sent, independent of retained history."""
+        identifier = getattr(message, "message_id", None)
+        if type(identifier) is not int:
+            return
+        sent = self.conversation_data.setdefault("sent_message_ids", [])
+        if identifier not in sent:
+            sent.append(identifier)
+            del sent[:-1024]
+
+    def sent_by_bot(self, message_id) -> bool:
+        return message_id in self.conversation_data.get("sent_message_ids", [])
+
+    def accept_update(self, update) -> bool:
+        """Deduplicate known Telegram updates, including ones with uncertain sends."""
+        key = self._update_key(update)
+        if key is None:
+            return True
         seen = self.conversation_data.setdefault("processed_updates", [])
         if key in seen:
             return False

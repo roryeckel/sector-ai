@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
 from telegram.error import NetworkError
 
@@ -80,11 +80,25 @@ async def test_autonomous_poll_uses_shared_capability_and_records_exact_history(
     assert receipt["question"] == POLL["question"]
     assert receipt["options"] == POLL["options"]
     assert receipt["status"] == "delivered"
-    assert update.message.calls_to("delete")
-    assert all("empty response" not in text for text in update.message.texts("edit_text"))
+    assert "Do not repeat them" in receipt["note"]
+    # Only the poll: no placeholder was posted, so none needs deleting.
+    assert update.message.shown() == []
+    assert update.message.calls_to("delete") == []
+    assert update.message.typing_count() >= 1
     # The post-tool model call sees a matched call/result pair; the volatile
     # snapshot is appended after the retained history.
     assert isinstance(context.bot_llm.received[-1][-2], ToolMessage)
+    # And the instruction it reads says delivered output is already on screen.
+    instruction = next(
+        message.content
+        for message in context.bot_llm.received[-1]
+        if isinstance(message, SystemMessage) and "available tools" in (message.content or "")
+    )
+    assert "already visible" in instruction
+    assert "never repeat" in instruction
+    assert "Never claim that your messages are never edited" in instruction
+    assert "do not deny one it confirms" in instruction
+    assert "say you cannot verify it" in instruction
 
 
 async def test_new_turn_removes_an_abandoned_placeholder(agent_context, make_update):
@@ -106,7 +120,7 @@ async def test_successful_turn_forgets_its_own_placeholder(agent_context, make_u
     assert "placeholder_unsettled" not in context.conversation_data
 
 
-async def test_reaction_only_turn_sets_reaction_and_removes_the_placeholder(agent_context, make_update):
+async def test_reaction_only_turn_sets_reaction_and_posts_no_message(agent_context, make_update):
     context = agent_context(
         tool_call("react_to_message", emoji="👍", identifier="call-r"),
         AIMessage(content=""),
@@ -123,8 +137,8 @@ async def test_reaction_only_turn_sets_reaction_and_removes_the_placeholder(agen
     receipt = json.loads(context.chat_message_history[-1].content)
     assert receipt["status"] == "delivered"
     assert receipt["reaction"]["emoji"] == "👍"
-    assert update.message.calls_to("delete")
-    assert update.message.texts("edit_text") == []
+    assert update.message.shown() == []
+    assert update.message.calls_to("delete") == []
 
 
 async def test_text_and_reaction_in_one_response_keep_both(agent_context, make_update):
@@ -137,10 +151,30 @@ async def test_text_and_reaction_in_one_response_keep_both(agent_context, make_u
 
     await run_agent(update, context, force=True)
 
-    assert any("Nice one" in text for text in update.message.texts("edit_text"))
+    assert any("Nice one" in text for text in update.message.shown())
     context.bot.set_message_reaction.assert_awaited_once()
     assert context.bot.set_message_reaction.await_args.kwargs["message_id"] == 77
     assert update.message.calls_to("delete") == []
+
+
+async def test_a_later_model_step_never_edits_earlier_text(agent_context, make_update):
+    response = AIMessage(
+        content="Checking the poll.",
+        tool_calls=[{"name": "react_to_message", "args": {"emoji": "👍"}, "id": "call-r", "type": "tool_call"}],
+    )
+    context = agent_context(response, AIMessage(content="Still one vote."))
+    update = make_update(text="check", message_id=77)
+
+    await run_agent(update, context, force=True)
+
+    # The post-tool answer is a new message; the text the user already saw is
+    # not overwritten.
+    assert update.message.texts("reply_text") == ["Checking the poll.", "Still one vote."]
+    assert update.message.calls_to("edit_text") == []
+    call_message = next(
+        message for message in context.chat_message_history if isinstance(message, AIMessage) and message.tool_calls
+    )
+    assert call_message.additional_kwargs["telegram"]["sender"] == {"is_bot": True}
 
 
 async def test_tools_are_bound_in_stable_name_order(agent_context, make_update, monkeypatch):
@@ -162,17 +196,18 @@ async def test_tools_are_bound_in_stable_name_order(agent_context, make_update, 
 
 
 @pytest.mark.parametrize(
-    "command,source,key",
+    "command,source,key,note",
     [
-        (poll_cmd, json.dumps(POLL), "question"),
-        (svg_cmd, SVG, "svg"),
-        (html_cmd, "<html><body>Blue</body></html>", "html"),
+        (poll_cmd, json.dumps(POLL), "question", "Do not repeat them"),
+        (svg_cmd, SVG, "svg", "Do not repeat or restate its content"),
+        (html_cmd, "<html><body>Blue</body></html>", "html", "Do not repeat or restate its contents"),
     ],
 )
 async def test_explicit_commands_enter_history_and_skip_engagement(
     command,
     source,
     key,
+    note,
     agent_context,
     make_update,
     monkeypatch,
@@ -187,7 +222,11 @@ async def test_explicit_commands_enter_history_and_skip_engagement(
     call, result = context.chat_message_history[-2:]
     assert call.additional_kwargs["origin"].startswith("/")
     assert result.tool_call_id == call.tool_calls[0]["id"]
-    assert key in json.loads(result.content)
+    receipt = json.loads(result.content)
+    assert key in receipt
+    # Every delivered artifact tells the model the user already sees it.
+    assert receipt["status"] == "delivered"
+    assert note in receipt["note"]
     assert len(context.bot_llm.received) == 1
     decision.assert_not_awaited()
 
@@ -217,6 +256,8 @@ async def test_uncertain_delivery_is_not_retried_and_preserves_content(agent_con
     result = json.loads(context.chat_message_history[-1].content)
     assert result["status"] == "delivery_uncertain"
     assert result["options"] == POLL["options"]
+    # Not delivered, so the model must not be told the user already saw it.
+    assert "note" not in result
 
 
 async def test_repeated_tool_request_does_not_post_twice(agent_context, make_update):
@@ -285,7 +326,7 @@ async def test_iteration_budget_stops_the_graph(agent_context, make_update):
     )
     update = make_update(text="make polls forever")
     await run_agent(update, context, force=True)
-    assert "iteration limit" in update.message.texts("edit_text")[-1]
+    assert "iteration limit" in update.message.shown()[-1]
     assert isinstance(context.chat_message_history[-2], ToolMessage)
 
 
@@ -401,6 +442,44 @@ async def test_disabled_autoreply_records_without_model_calls(agent_context, mak
     assert update.message.calls == []
 
 
+async def test_no_typing_while_deciding_whether_to_respond(agent_context, make_update, monkeypatch):
+    context = agent_context()
+    seen = {}
+    update = make_update(text="hello everyone")
+
+    async def decide(update, context):
+        seen["typing"] = update.message.typing_count()
+        return False
+
+    monkeypatch.setattr("sector_ai.agent.should_respond", decide)
+    await run_agent(update, context)
+
+    assert seen["typing"] == 0
+    assert update.message.calls == []
+
+
+async def test_typing_starts_once_the_bot_engages(agent_context, make_update, monkeypatch):
+    context = agent_context(AIMessage(content="Hi there"))
+    update = make_update(text="hello everyone")
+    monkeypatch.setattr("sector_ai.agent.should_respond", AsyncMock(return_value=True))
+
+    await run_agent(update, context)
+
+    assert update.message.typing_count() >= 1
+    assert update.message.shown() == ["Hi there"]
+
+
+async def test_an_error_before_any_text_is_sent_as_a_reply(agent_context, make_update, monkeypatch):
+    context = agent_context(AIMessage(content="unused"))
+    monkeypatch.setattr(context, "maybe_compact", AsyncMock(side_effect=RuntimeError("summarizer down")))
+    update = make_update(text="hello")
+
+    await run_agent(update, context, force=True)
+
+    assert update.message.texts("reply_text") == ["Error processing chat response: summarizer down"]
+    assert update.message.texts("edit_text") == []
+
+
 async def test_direct_mention_bypasses_decision(agent_context, make_update, monkeypatch):
     context = agent_context(AIMessage(content="Hello!"))
     decision = AsyncMock(side_effect=AssertionError("mention should bypass"))
@@ -425,7 +504,7 @@ async def test_unsupported_tool_endpoint_falls_back_before_any_action(agent_cont
     update = make_update(text="hello")
     await run_agent(update, context, force=True)
     assert context.chat_message_history[-1].content == "Plain answer."
-    assert update.message.texts("edit_text")[-1] == "Plain answer."
+    assert update.message.shown()[-1] == "Plain answer."
     assert context.bot_data["non_tool_models"]
 
 
@@ -612,7 +691,7 @@ async def test_post_tool_plain_fallback_does_not_send_oversized_context(
     context = make_context(
         model=model,
         settings=make_settings(
-            context_length=2000,
+            context_length=2400,
             agent_max_tool_calls=max_calls,
             mcp_config="unused",
             streaming_interval_sec=999,
@@ -628,9 +707,9 @@ async def test_post_tool_plain_fallback_does_not_send_oversized_context(
     update = make_update(text="read it")
     await run_agent(update, context, force=True)
     invocation.assert_awaited_once()
-    assert all(context._estimate_token_count(messages) <= 1800 for messages in model.received)
+    assert all(context._estimate_token_count(messages) <= 2160 for messages in model.received)
     assert compact.await_count >= 2
-    assert "context window" in update.message.texts("edit_text")[-1]
+    assert "context window" in update.message.shown()[-1]
 
 
 def test_interruption_cleanup_uses_only_current_transaction(agent_context):

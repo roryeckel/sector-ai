@@ -103,6 +103,9 @@ class Settings(BaseSettings):
     image_patch_px: int = Field(default=28, ge=8, le=128)
     # Seconds to wait for the rest of an album before answering it as one turn.
     album_wait: float = Field(default=1.5, ge=0, le=30)
+    # How many times a newer relevant message (or an edit) may restart a turn
+    # that has not sent anything yet. 0 disables debouncing.
+    debounce_max_restarts: int = Field(default=3, ge=0, le=20)
     default_svg_size: int = Field(default=250, ge=16, le=2048)
 
     admin_usernames: Annotated[list[str], NoDecode] = ["ex0dus"]

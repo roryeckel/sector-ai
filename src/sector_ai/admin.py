@@ -7,6 +7,7 @@ from telegram.error import BadRequest
 
 from .history import scoped_control
 from .sector_context import SectorContext
+from .typing_indicator import typing
 
 logger = logging.getLogger(__name__)
 
@@ -62,21 +63,23 @@ async def usage_cmd(update: Update, context: SectorContext) -> None:
 @admin_only
 @scoped_control
 async def compact_cmd(update: Update, context: SectorContext) -> None:
-    # The count and the summary are both model/HTTP calls; say something first.
-    status = await update.message.reply_text("Compacting...")
-    before = await context.count_context_tokens()
-    try:
-        result = await context.compact()
-    except Exception:
-        logger.exception("Manual compaction failed")
-        await status.edit_text("Compaction failed; the history was left unchanged. Check the logs.")
-        return
-    if not result["compacted"]:
-        await status.edit_text("Not enough history to compact yet.")
-        return
+    # The count and the summary are both model/HTTP calls; show that a reply is coming.
+    async with typing(update.message):
+        before = await context.count_context_tokens()
+        try:
+            result = await context.compact()
+        except Exception:
+            logger.exception("Manual compaction failed")
+            await update.message.reply_text("Compaction failed; the history was left unchanged. Check the logs.")
+            return
+        if not result["compacted"]:
+            await update.message.reply_text("Not enough history to compact yet.")
+            return
 
-    after = await context.count_context_tokens()
-    await status.edit_text(f"Compacted {result['evicted']} messages into a summary: {before} → {after} tokens.")
+        after = await context.count_context_tokens()
+        await update.message.reply_text(
+            f"Compacted {result['evicted']} messages into a summary: {before} → {after} tokens."
+        )
 
 
 # async def model_cmd(update: Update, context: SectorContext) -> None:

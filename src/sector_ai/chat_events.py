@@ -1,15 +1,19 @@
 """Observe selected service messages without starting autonomous agent turns."""
 
 import json
+import logging
 from hashlib import sha256
 
 from langchain_core.messages import HumanMessage
 from telegram.ext import filters
 
 from .chat_metadata import actor_metadata, message_metadata, text_value, utc_now, utc_timestamp
+from .debounce import supersede, turn_for_message
 from .history import scoped_control
 from .poll_tracking import poll_vote_labels
 from .sector_context import SectorContext
+
+logger = logging.getLogger(__name__)
 
 MESSAGE_EDIT_FILTER = filters.UpdateType.EDITED_MESSAGE | filters.UpdateType.EDITED_CHANNEL_POST
 
@@ -86,6 +90,34 @@ def observed_event(event: dict, metadata: dict):
         name="telegram_event",
         content="Telegram event (observed data): " + json.dumps(event, ensure_ascii=False),
         additional_kwargs={"telegram": {"kind": "chat_event", **metadata}},
+    )
+
+
+async def handle_edited_message(update, context):
+    """Apply an edit; if it changes a message the bot is still silently working on, restart that turn."""
+    context.bind_update(update)
+    message_id = getattr(update.effective_message, "message_id", None)
+    limit = context.settings.debounce_max_restarts
+    turn = turn_for_message(context, message_id) if type(message_id) is int and limit > 0 else None
+    # Only a running turn has ingested its message, so only then does the edit
+    # replace text the restarted turn will read.
+    if turn is None or turn.task is None or turn.restarts >= limit:
+        await handle_message_edit(update, context)
+        return
+    engage = True if turn.engaged else None
+    supersede([turn])
+    logger.info("Edit of message %s restarted its unanswered turn", message_id)
+    await handle_message_edit(update, context)
+    from .agent import run_agent
+
+    await run_agent(
+        update,
+        context,
+        ingest=False,
+        debounce=True,
+        engage=engage,
+        edited=True,
+        restarts=turn.restarts + 1,
     )
 
 

@@ -55,6 +55,16 @@ class GeneratedOutput:
     png: BytesIO | None = None
 
 
+# A delivered result is already on screen. Say so in the receipt, so the next
+# model step does not restate content the user can see. Reactions carry a
+# similar note. Other tools' results are private and must be relayed instead.
+DELIVERY_NOTES = {
+    "svg": "Delivered as an image in this chat; the user can already see it. Do not repeat or restate its content.",
+    "html": "Delivered as the Website.html document in this chat. Do not repeat or restate its contents.",
+    "poll": "Delivered as a Telegram poll in this chat; its question and options are already visible. Do not repeat them.",
+}
+
+
 def strip_fence(text: str) -> str:
     match = re.fullmatch(r"```(?:svg|xml|html)?\s*\n?(.*?)\n?```", text.strip(), re.DOTALL)
     return match.group(1).strip() if match else text.strip()
@@ -199,7 +209,8 @@ async def deliver_output(output: GeneratedOutput, update, context) -> dict:
                 is_anonymous=False,
             )
             track_delivered_poll(sent, update, context)
-        result.update(status="delivered", telegram=telegram_references(sent))
+        context.remember_sent(sent)
+        result.update(status="delivered", telegram=telegram_references(sent), note=DELIVERY_NOTES[output.kind])
     except asyncio.CancelledError:
         # Persist this before propagating a run-level timeout/cancellation.
         result.update(status="delivery_uncertain", error="Delivery was interrupted; do not automatically resend.")
@@ -232,17 +243,20 @@ def builtin_tools(update, context, model, *, topic=False) -> list[AgentTool]:
         (
             "generate_svg",
             "svg",
-            "Generate an SVG illustration and send its rendered PNG to this chat. Include relevant prior SVG source in the prompt when revising.",
+            "Generate an SVG illustration and send its rendered PNG to this chat. The image is delivered, so do not "
+            "repeat or restate it in your reply. Include relevant prior SVG source in the prompt when revising.",
         ),
         (
             "generate_html",
             "html",
-            "Generate an HTML page and send it as a document to this chat. Include relevant prior HTML when revising.",
+            "Generate an HTML page and send it as a document to this chat. The page is delivered, so do not repeat "
+            "or restate its contents in your reply. Include relevant prior HTML when revising.",
         ),
         (
             "create_poll",
             "poll",
-            "Generate a poll question and options from a prompt, and post a non-anonymous Telegram poll to this chat.",
+            "Generate a poll question and options from a prompt, and post a non-anonymous Telegram poll to this chat. "
+            "The poll is delivered, so do not repeat its question or options in your reply.",
         ),
     ]:
 

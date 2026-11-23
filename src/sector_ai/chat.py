@@ -5,9 +5,9 @@ from telegram import Update
 from telegram.error import NetworkError
 
 from .logging_utils import redact_for_user
-from .retry import retry_on_network_error
 from .sector_context import SectorContext
-from .streaming_handler import handle_streaming_response
+from .streaming_handler import LazyReply, handle_streaming_response
+from .typing_indicator import typing
 
 logger = logging.getLogger(__name__)
 
@@ -15,21 +15,25 @@ logger = logging.getLogger(__name__)
 async def stream_chat(
     update: Update, context: SectorContext, system_prompt: str = None, save_ai_message=True, *, response_message=None
 ) -> None:
+    """Stream a plain reply into ``response_message``, a ``LazyReply`` the caller owns.
+
+    Without one, the reply is posted when the first text arrives and the chat
+    shows "typing" until then (and while it streams).
+    """
+    if response_message is None:
+        await context.remove_pending_placeholder()
+        async with typing(update.effective_message):
+            await stream_chat(
+                update,
+                context,
+                system_prompt,
+                save_ai_message,
+                response_message=LazyReply(context, update.effective_message),
+            )
+        return
+
     response = ""
     try:
-        # Post this before compaction: folding a long transcript is another
-        # model call, and the chat should not look silent while it runs.
-        if response_message is None:
-            await context.remove_pending_placeholder()
-            response_message = await retry_on_network_error(
-                lambda: update.message.reply_text("Processing..."), what="Processing placeholder"
-            )
-            if response_message is not None:
-                context.remember_placeholder(response_message)
-        if response_message is None:
-            logger.error("Could not post the placeholder; dropping this reply")
-            return
-
         for attempt in range(3):
             try:
                 # This path is also used after tools exhaust their budget or
@@ -58,15 +62,13 @@ async def stream_chat(
             response = response[3:].strip()
 
         if save_ai_message and response:
-            context.save_assistant_message(response, response_message)
+            context.save_assistant_message(response, response_message.message)
         context.finish_placeholder()
 
     except NetworkError:
         raise
     except Exception as e:
-        if response_message is None:
-            raise
-        await response_message.edit_text(f"Error processing chat response: {redact_for_user(str(e), context.settings)}")
+        await response_message.write(f"Error processing chat response: {redact_for_user(str(e), context.settings)}")
         context.finish_placeholder()
 
 

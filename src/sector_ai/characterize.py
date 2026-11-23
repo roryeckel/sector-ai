@@ -7,6 +7,7 @@ from .chat_metadata import instruction_messages, strip_internal_envelope, with_c
 from .history import scoped_control
 from .message_text import message_refused, message_text
 from .sector_context import SectorContext
+from .typing_indicator import typing
 from .usage import record_usage
 
 logger = logging.getLogger(__name__)
@@ -33,16 +34,17 @@ async def characterize_cmd(update: Update, context: SectorContext) -> None:
         ),
         context,
     )
-    message = await context.bind_cache(context.bot_llm, "characterize").ainvoke(messages)
-    record_usage(context, "characterize", message)
-    if message_refused(message):
-        await update.message.reply_text(message_text(message) or "The model refused the request.")
-        return
-    characterization = strip_internal_envelope(message_text(message))
-    if not characterization.strip():
-        await update.message.reply_text("The model returned an empty response; the system prompt was not changed.")
-        return
-    await update.message.reply_text(f"Update the system prompt to generated characterization:\n{characterization}")
+    async with typing(update.message):
+        message = await context.bind_cache(context.bot_llm, "characterize").ainvoke(messages)
+        record_usage(context, "characterize", message)
+        if message_refused(message):
+            await update.message.reply_text(message_text(message) or "The model refused the request.")
+            return
+        characterization = strip_internal_envelope(message_text(message))
+        if not characterization.strip():
+            await update.message.reply_text("The model returned an empty response; the system prompt was not changed.")
+            return
+        await update.message.reply_text(f"Update the system prompt to generated characterization:\n{characterization}")
     logger.info(f"Characterization: {characterization}")
     context.clear_history()
     context.chat_system_prompt = characterization

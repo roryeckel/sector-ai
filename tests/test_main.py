@@ -234,7 +234,10 @@ def test_main_registers_every_command(tmp_path, monkeypatch):
     assert any(isinstance(handler, CallbackQueryHandler) for handler in application.handlers)
     assert len([handler for handler in application.handlers if isinstance(handler, MessageHandler)]) == 4
     assert any(handler.callback is entrypoint.handle_chat_event for handler in application.handlers)
-    assert application.handlers[0].callback is entrypoint.handle_message_edit
+    assert application.handlers[0].callback is entrypoint.handle_edited_message
+    # Turns run concurrently so a newer message can supersede an unanswered one.
+    concurrent = {handler.callback for handler in application.handlers if not handler.block}
+    assert concurrent == {entrypoint.handle_edited_message, entrypoint.handle_message, entrypoint.handle_photo}
     assert any(isinstance(handler, PollHandler) for handler in application.handlers)
     assert any(
         isinstance(handler, PollAnswerHandler) and handler.callback is entrypoint.handle_poll_answer
@@ -279,7 +282,7 @@ async def test_edited_admin_command_is_intercepted_before_command_dispatch(tmp_p
     context.chat_message_history.append(HumanMessage(content="retain this history"))
     context.chat_system_prompt = "retain this prompt"
     first = next(handler for handler in application.handlers if handler.check_update(update))
-    assert first.callback is entrypoint.handle_message_edit
+    assert first.callback is entrypoint.handle_edited_message
     await first.callback(update, context)
     assert context.chat_message_history[0].content == "retain this history"
     assert context.chat_system_prompt == "retain this prompt"

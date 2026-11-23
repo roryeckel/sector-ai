@@ -19,7 +19,7 @@ async def test_summarize_uses_summarization_prompt(make_context, make_update):
     expected = context.settings.system_prompts.summarization.format(MAX_LEN=4096, USERNAME="testbot")
     assert isinstance(sent[0], SystemMessage)
     assert sent[0].content == expected
-    assert update.message.texts("edit_text")[-1] == "a short summary"
+    assert update.message.shown()[-1] == "a short summary"
 
 
 async def test_tokens_reports_the_current_context(make_context, make_update, monkeypatch):

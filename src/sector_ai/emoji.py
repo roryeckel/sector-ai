@@ -17,6 +17,7 @@ from .chat_metadata import (
 from .history import plain_history, record_content_command
 from .message_text import message_text
 from .sector_context import SectorContext
+from .typing_indicator import typing
 from .usage import record_usage
 
 logger = logging.getLogger(__name__)
@@ -108,6 +109,11 @@ async def emoji_cmd(update: Update, context: SectorContext) -> None:
             await update.message.reply_text("Please enter some text to turn into emojis")
             return
     logger.info("Emoji Prompt: %s", prompt or "[recent conversation]")
+    async with typing(update.message):
+        await _reply_with_emojis(update, context, messages)
+
+
+async def _reply_with_emojis(update: Update, context: SectorContext, messages) -> None:
     message = await context.bind_cache(context.bot_llm, "emoji").ainvoke(messages)
     record_usage(context, "emoji", message)
     emoji_response = strip_internal_envelope(message_text(message))

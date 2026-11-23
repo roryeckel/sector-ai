@@ -336,7 +336,7 @@ async def handle_photo(update, context) -> None:
     message = update.effective_message
     group = getattr(message, "media_group_id", None)
     if not isinstance(group, str) or not group:
-        await run_agent(update, context, photos=[message])
+        await run_agent(update, context, photos=[message], debounce=True)
         return
 
     chat = getattr(getattr(update, "effective_chat", None), "id", None)
@@ -357,6 +357,6 @@ async def handle_photo(update, context) -> None:
             (item for item in updates if getattr(item.effective_message, "caption", None)),
             updates[0],
         )
-        await run_agent(primary, context, photos=[item.effective_message for item in updates])
+        await run_agent(primary, context, photos=[item.effective_message for item in updates], debounce=True)
 
     context.application.create_task(flush(), update=update)

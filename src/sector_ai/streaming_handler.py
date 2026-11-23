@@ -7,6 +7,7 @@ from telegram import Message, MessageEntity
 from telegram.error import BadRequest, NetworkError
 
 from .chat_metadata import strip_internal_envelope
+from .debounce import commit_or_stop
 from .logging_utils import redact_for_user
 from .message_text import message_text
 from .retry import retry_on_network_error
@@ -15,6 +16,48 @@ from .telegram_format import render_chunks, render_preview, telegram_entities
 from .usage import record_usage, usage_details
 
 logger = logging.getLogger(__name__)
+
+
+class LazyReply:
+    """The bot's reply to ``source``, posted only once there is text to show.
+
+    The first write sends a reply; later writes edit it. A turn that never
+    produces visible text, such as one that only sends a poll, leaves nothing
+    behind in the chat.
+    """
+
+    def __init__(self, context: SectorContext, source=None, *, message=None):
+        self.context = context
+        self.source = source
+        self.message = message
+
+    @classmethod
+    def wrap(cls, context: SectorContext, target) -> "LazyReply":
+        """Accept a ``LazyReply`` or an already posted message."""
+        return target if isinstance(target, LazyReply) else cls(context, message=target)
+
+    @property
+    def chat_id(self):
+        return getattr(self.message or self.source, "chat_id", None)
+
+    @property
+    def message_thread_id(self):
+        return getattr(self.message or self.source, "message_thread_id", None)
+
+    async def write(self, text: str, entities: list[MessageEntity] | None = None):
+        # Claimed before the request goes out: a newer message can never cancel a
+        # turn while its first send is in flight, and a write queued by a turn
+        # that was just superseded never goes out.
+        commit_or_stop(self.context)
+        if self.message is not None:
+            return await self.message.edit_text(text, entities=entities)
+        sent = await self.source.reply_text(text, entities=entities)
+        if sent is not None:
+            self.message = sent
+            self.context.remember_sent(sent)
+            # Tracked so a cursor left behind by a failed edit can be removed.
+            self.context.remember_placeholder(sent)
+        return sent
 
 
 def _payload_key(text: str, entities: list[MessageEntity] | None) -> tuple:
@@ -30,12 +73,13 @@ def _payload_key(text: str, entities: list[MessageEntity] | None) -> tuple:
 
 async def handle_streaming_response(
     context: SectorContext,
-    response_message: Message,
+    response_message: "LazyReply | Message",
     stream_generator: AsyncIterator,
     log_prefix: str,
     *,
     allow_empty: bool = False,
 ) -> str:
+    reply = LazyReply.wrap(context, response_message)
     response = ""
     buffer = ""
     last_sent = None
@@ -58,7 +102,7 @@ async def handle_streaming_response(
             return True
         try:
             delivered = await retry_on_network_error(
-                lambda: response_message.edit_text(text, entities=entities or None),
+                lambda: reply.write(text, entities or None),
                 what="Telegram edit",
                 delays=(2.0, 5.0),
             )
@@ -93,7 +137,7 @@ async def handle_streaming_response(
         return await edit(text, telegram_entities(entities) if entities_ok else None)
 
     async def deliver_final() -> bool:
-        """Edit the placeholder with the first message, then send the rest."""
+        """Post or edit the reply with the first message, then send the rest."""
         nonlocal buffer, response
         async with buffer_lock:
             if buffer:
@@ -108,10 +152,10 @@ async def handle_streaming_response(
         if not await edit(text, telegram_entities(entities) if entities_ok else None):
             return False
 
-        thread_id = getattr(response_message, "message_thread_id", None)
+        thread_id = reply.message_thread_id
         for text, entities in chunks[1:]:
             payload = telegram_entities(entities) if entities_ok else None
-            kwargs = {"chat_id": response_message.chat_id, "text": text, "entities": payload}
+            kwargs = {"chat_id": reply.chat_id, "text": text, "entities": payload}
             if type(thread_id) is int:
                 kwargs["message_thread_id"] = thread_id
             sent = await retry_on_network_error(
@@ -122,6 +166,7 @@ async def handle_streaming_response(
             if sent is None:
                 logger.error("%s could not deliver every message part", log_prefix)
                 return False
+            context.remember_sent(sent)
         return True
 
     try:
@@ -158,9 +203,9 @@ async def handle_streaming_response(
 
         if not allow_empty and not visible.strip() and (saw_chunk or not ended_with_falsy):
             if finish_reason == "refusal":
-                await response_message.edit_text("The model refused the request.")
+                await reply.write("The model refused the request.")
             else:
-                await response_message.edit_text("The model returned an empty response.")
+                await reply.write("The model returned an empty response.")
             logger.warning("%s returned no text", log_prefix)
 
         if delivered:
@@ -187,7 +232,7 @@ async def handle_streaming_response(
         return ""
     except Exception as e:
         error_message = f"Error processing {log_prefix.lower()}: {redact_for_user(str(e), context.settings)}"
-        await response_message.edit_text(error_message)
+        await reply.write(error_message)
         context.finish_placeholder()
         logger.error(error_message)
         return ""

@@ -2,6 +2,7 @@
 
 from unittest.mock import MagicMock
 
+import pytest
 from telegram import MessageEntity
 
 from sector_ai.telegram_format import (
@@ -90,6 +91,11 @@ def test_a_preview_fits_one_message_including_the_cursor():
 
     assert text.endswith("🦙")
     assert utf16_len(text) <= MESSAGE_LIMIT
+
+
+@pytest.mark.parametrize("text", ["", "  \n", "\t"])
+def test_a_preview_with_no_visible_text_has_no_cursor(text):
+    assert render_preview(text, cursor="🦙") == ("", [])
 
 
 def test_splitting_clips_entities_at_the_break():

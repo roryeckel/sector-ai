@@ -9,7 +9,12 @@ agents, durable checkpoints, or separate long-term memory database.
 The model may select `generate_svg`, `generate_html`, `create_poll`, or
 `react_to_message` without a slash command. The generation capabilities produce
 **and deliver** their outputs; `react_to_message` sets one standard Telegram
-reaction and never sends text. `/svg`, `/html`, and `/poll` select the
+reaction and never sends text. A successful delivery receipt states that the
+content is already visible and that the question/options, image or page must not
+be repeated, quoted or re-listed by the model, so the same poll or artifact is
+not sent twice in text. Results from other tools, including MCP tools, were not
+delivered to the chat; the model is told to relay what matters from them unless
+their result says otherwise. `/svg`, `/html`, and `/poll` select the
 generators directly; `/topic` shares poll generation with a context-based
 prompt. Reactions have no command. Commands bypass engagement and do not need
 native model tool calling.
@@ -17,7 +22,8 @@ native model tool calling.
 Requests, assistant tool calls, and matching tool results share one conversation
 history. SVG/HTML results include generated source; polls include the actual
 question and options. A result records whether delivery succeeded, failed, or
-could not be confirmed, plus Telegram identifiers where available. Text-only
+could not be confirmed, plus Telegram identifiers where available. Only a
+confirmed delivery carries the "already visible, do not repeat" note. Text-only
 models receive an attributed textual projection of those events.
 
 The SVG source is context, not a claim that a model visually inspected the PNG.
@@ -26,16 +32,38 @@ recent history or its compacted summary. Compaction and history limits keep tool
 call/result groups together. Large external results are explicitly truncated.
 Tool schemas and arguments count toward the context budget.
 
+A turn may make several model requests, for example one that calls a tool and a
+later one that answers with its result. Each response that contains visible text
+is delivered as its own Telegram message: the first write sends it and later
+chunks edit the same message while it streams. Once a response with tool calls
+has been delivered, the next model request starts a new message instead of
+editing the text the user already saw. Telegram flood control (`RetryAfter`) is
+waited out and retried when the window is 30 seconds or less; a longer window
+fails that delivery instead of retrying before Telegram allows it. If a reply's
+final edit fails and leaves the streaming cursor behind, that message stays
+tracked for cleanup even when later replies in the same turn are posted.
+The model is told that its text is streamed and edited by the delivery layer, so
+it must not claim that its messages are never edited or argue about which
+message a reaction is attached to. It is also told that retained context is
+partial: when an earlier action is missing from history, it should say it cannot
+verify the action rather than assert that it never happened.
+
 `react_to_message` targets the current message, the message this turn replies
-to, the bot's own most recent text message, or an explicit message ID in the
-conversation. Bots may set one reaction per message; custom and paid reactions
-are not supported. The tool does not send text: if the model also wants to
-speak, that text is part of the same assistant response and is delivered before
-the reaction runs. A reaction receipt records the emoji, target message ID, and
-whether Telegram confirmed it. A network failure is retried once because
-re-setting the same reaction is idempotent; an unresolved reaction is never
-reported as successful. Reactions made by users are not observed, because
-polling still does not subscribe to `message_reaction`.
+to, or an explicit message ID in the conversation. The bot may react to its own
+messages when it means to; every message it sends (replies, continuation
+chunks, images, pages, polls) is recorded independently of history, so a
+receipt on one of them is marked `own_message` and says "your own message".
+That keeps a deliberate self-reaction possible without letting the model later
+deny or misattribute it. Bots may set one reaction per message; custom and
+paid reactions are not supported. The tool does not send text: if the model also
+wants to speak, that text is part of the same assistant response and is delivered
+before the reaction runs. A reaction receipt records the emoji, target message ID,
+the target's sender and text excerpt, and whether Telegram confirmed it, so the
+model can describe the action instead of guessing which bubble it landed on. A
+network failure is retried once because re-setting the same reaction is
+idempotent; an unresolved reaction is never reported as successful. Reactions
+made by users are not observed, because polling still does not subscribe to
+`message_reaction`.
 
 `/code`, `/emoji`, `/decide`, and `/summarize` also record content requests and
 responses, but are not autonomous tools. Administrative controls are not tools.
@@ -129,6 +157,41 @@ history-message count to zero omits recent messages but retains the bounded
 summary, metadata and latest input. If the decision prompt cannot fit or parsing
 fails, the bot stays silent. Commands and direct-reply/mention routing still
 bypass this model decision as before.
+
+### Debouncing
+
+Text, photo and edit updates are handled concurrently; each turn still holds
+the conversation lock, as do commands and controls. A turn is *committed* from
+the moment it starts its first Telegram write (reply text, reaction, poll,
+image, page) or its first tool execution. The flag is set before the request
+goes out. Until then the turn has had no visible effect, so a newer message can
+take it over:
+
+- A message arriving while an older turn is uncommitted (running, or waiting
+  for the lock) is checked for relevance. It is relevant if it replies to or
+  @mentions the bot, comes from the same sender as an older turn that has
+  already decided to answer, or the normal engagement decision says to respond.
+  That decision reads history plus the new message, without writing to history.
+- If it is relevant and the older turns are still uncommitted, they are
+  cancelled. Their messages stay in history; a tool request whose tools never
+  started is dropped. The new message's turn answers without deciding again,
+  with every message in context, replying to the newest one.
+- An edit of the message an uncommitted running turn is answering cancels that
+  turn, applies the edit, and starts a new turn on the edited text. It reuses
+  the original engagement decision if one was made.
+- Otherwise, including any message after the bot has replied or acted, the new
+  message waits and runs as its own turn, with its own engagement decision.
+
+A turn only supersedes turns that arrived before it, and waits until each of
+them has stored its message before answering, so a message still being checked
+is never lost or answered after its replacement. A redelivered update never
+takes over the turn it duplicates. Commit and supersede exclude each other: a
+preview write queued by a turn that was just superseded is refused before it
+reaches Telegram.
+
+`SECTOR_AI_DEBOUNCE_MAX_RESTARTS` (default 3) caps how many times one chain of
+turns can restart, so a busy chat cannot postpone an answer forever. `0`
+disables debouncing. Slash commands are never superseded.
 
 ## Photos
 
@@ -314,10 +377,14 @@ execution timeout, or MCP transport failure blocks additional tools that turn.
 Reactions are also sent once per execution. Re-setting the same reaction is
 idempotent, so a network failure is retried once; a reaction that cannot be
 confirmed is reported as uncertain rather than delivered.
-The streaming "Processing..." message always carries a cursor. If an edit that
-would replace the cursor fails, that message is remembered for the whole turn
-and deleted at the start of the next one, so a failed delivery cannot leave a
-second cursor in the chat. A successful turn forgets its placeholder instead.
+Once the bot decides to respond (never while it is still deciding whether to),
+the chat shows Telegram's typing indicator until the turn ends. No placeholder
+message is posted: the reply appears with the first visible text, carrying the
+streaming cursor, and a turn that only sends a poll, artifact or reaction
+leaves no empty message behind. If an edit that would replace the cursor fails,
+that message is remembered for the whole turn and deleted at the start of the
+next one, so a failed delivery cannot leave a second cursor in the chat. A
+successful turn forgets its reply instead.
 The model can explain the uncertainty but cannot automatically resend. If a
 multi-tool run is interrupted, an interrupted-delivery receipt is attributed
 only to the tool call that was actually executing; calls that never started are

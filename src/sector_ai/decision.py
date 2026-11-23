@@ -10,6 +10,7 @@ from .chat_metadata import instruction_messages, strip_internal_envelope, with_c
 from .history import record_content_command
 from .message_text import message_text
 from .sector_context import SectorContext
+from .typing_indicator import typing
 from .usage import record_usage
 
 logger = logging.getLogger(__name__)
@@ -70,6 +71,7 @@ async def decide_cmd(update: Update, context: SectorContext) -> None:
         await update.message.reply_text("No prompt provided.")
         return
     decide_prompt = decide_prompt[-1]
-    decision = await make_decision(decide_prompt, context)
-    sent = await update.message.reply_text(str(decision))
+    async with typing(update.message):
+        decision = await make_decision(decide_prompt, context)
+        sent = await update.message.reply_text(str(decision))
     context.save_assistant_message(str(decision), sent)

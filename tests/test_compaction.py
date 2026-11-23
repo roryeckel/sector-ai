@@ -231,9 +231,9 @@ async def test_handle_chat_compacts_before_replying(make_context, make_settings,
     await handle_chat(_update(), context)
 
     assert context.context_summary == "compacted summary"
-    # The static context note adds prompt overhead, so this tight synthetic
-    # budget keeps 7 messages plus the new reply.
-    assert len(context.chat_message_history) == 8
+    # The static context note and system prompt add overhead, so this tight
+    # synthetic budget keeps 6 messages plus the new reply.
+    assert len(context.chat_message_history) == 7
     assert isinstance(context.chat_message_history[-1], AIMessage)
 
     reply_prompt = context.bot_llm.received[-1]
@@ -246,8 +246,7 @@ async def test_a_failed_delivery_does_not_regenerate(make_context, make_settings
     settings = make_settings(streaming_interval_sec=999, streaming_chunk_size=999_999)
     context = make_context(model=fake_model("first answer", "second answer"), settings=settings)
     update = _update()
-    posted = SimpleNamespace(edit_text=AsyncMock(side_effect=NetworkError("502")))
-    update.message.reply_text = AsyncMock(return_value=posted)
+    update.message.reply_text = AsyncMock(side_effect=NetworkError("502"))
 
     await handle_chat(update, context)
 
@@ -257,20 +256,24 @@ async def test_a_failed_delivery_does_not_regenerate(make_context, make_settings
     assert len(context.bot_llm.received) == 2
 
 
-async def test_processing_is_posted_before_compaction(make_context, make_update, monkeypatch):
+async def test_typing_is_shown_before_compaction(make_context, make_update, monkeypatch):
     context = make_context("reply")
     update = make_update(text="/chat hello")
     seen = {}
 
     async def compact():
-        seen["posted"] = update.message.texts("reply_text")
+        seen["typing"] = update.message.typing_count()
+        seen["posted"] = update.message.shown()
         return False
 
     monkeypatch.setattr(context, "maybe_compact", compact)
 
     await handle_chat(update, context)
 
-    assert seen["posted"] == ["Processing..."]
+    # Folding a long transcript is another model call; the chat shows typing
+    # meanwhile, without posting a placeholder message.
+    assert seen["typing"] >= 1
+    assert seen["posted"] == []
 
 
 async def test_clear_history_drops_the_summary(make_context):
@@ -342,6 +345,7 @@ def _update():
             date=datetime.now(UTC),
             reply_text=AsyncMock(),
             edit_text=AsyncMock(),
+            reply_chat_action=AsyncMock(return_value=True),
             reply_to_message=None,
         )
         return SimpleNamespace(message=message, effective_message=message, effective_user=message.from_user)

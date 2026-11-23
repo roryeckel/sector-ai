@@ -15,6 +15,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, PropertyMock
 
+import httpx
 import pytest
 from langchain_core.language_models import GenericFakeChatModel
 from langchain_core.messages import AIMessage
@@ -24,6 +25,27 @@ from sector_ai.sector_context import SectorContext
 from sector_ai.settings import Settings
 
 TEST_TOKEN = "123:test-token"
+
+
+@pytest.fixture(autouse=True)
+def _no_network(monkeypatch):
+    """Refuse real HTTP connections instantly.
+
+    Context-length and model lookups otherwise dial the default local server,
+    and a refused connection still costs seconds on some platforms. Raising
+    ``ConnectError`` is exactly what a refusal looks like to the code under
+    test. Tests that need responses use ``httpx.MockTransport``, which this
+    does not touch.
+    """
+
+    def refuse(self, request):
+        raise httpx.ConnectError("network disabled in tests", request=request)
+
+    async def refuse_async(self, request):
+        refuse(self, request)
+
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", refuse)
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", refuse_async)
 
 
 @pytest.fixture
@@ -82,6 +104,7 @@ def mock_update():
         update.effective_user.username = username
         update.message.reply_text = AsyncMock()
         update.message.reply_poll = AsyncMock()
+        update.message.reply_chat_action = AsyncMock(return_value=True)
         return update
 
     return _factory
@@ -202,10 +225,22 @@ class RecordingMessage:
     async def delete(self):
         self._record("delete", (), {})
 
+    async def reply_chat_action(self, action, **kwargs):
+        # Cosmetic and never retried, so it is recorded but never made to fail.
+        self.calls.append(("reply_chat_action", (action,), kwargs))
+        return True
+
     # Assertion helpers
 
     def calls_to(self, name: str) -> list[tuple[tuple, dict]]:
         return [(args, kwargs) for method, args, kwargs in self.calls if method == name]
+
+    def shown(self) -> list[str]:
+        """Every text the bot posted or edited in, in order."""
+        return [args[0] for method, args, _ in self.calls if method in {"reply_text", "edit_text"}]
+
+    def typing_count(self) -> int:
+        return len(self.calls_to("reply_chat_action"))
 
     def last_text(self) -> str:
         return self.calls_to("reply_text")[-1][0][0]

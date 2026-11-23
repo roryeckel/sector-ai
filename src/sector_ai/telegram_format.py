@@ -96,8 +96,12 @@ def render_preview(text: str, *, enabled: bool = True, cursor: str = "") -> tupl
 
     The cursor is added after conversion so it can never land inside a code
     block or link, and the preview is trimmed to the first message before it.
+    Nothing visible yet means no preview at all, so the cursor never shows on
+    its own before generation produces text.
     """
     rendered, entities = render_markdown(text, enabled=enabled)
+    if not rendered.strip():
+        return "", []
     budget = MESSAGE_LIMIT - utf16_len(cursor)
     if budget > 0 and utf16_len(rendered) > budget:
         chunks = split_for_telegram(rendered, entities, budget)

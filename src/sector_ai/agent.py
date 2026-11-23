@@ -5,9 +5,9 @@ SectorContext. The graph never maintains a second transcript/checkpoint copy.
 """
 
 import asyncio
+import contextlib
 import json
 import logging
-import re
 from datetime import UTC, datetime, timedelta
 from typing import TypedDict
 from uuid import uuid4
@@ -19,6 +19,7 @@ from langgraph.graph import END, START, StateGraph
 from referencing import Registry
 from telegram.error import NetworkError
 
+from . import debounce as debounce_turns
 from .autoreply import should_respond
 from .capabilities import builtin_tools
 from .chat_metadata import is_message_edit, message_metadata, utc_now
@@ -26,8 +27,9 @@ from .images import load_photos
 from .logging_utils import redact_for_user
 from .mcp_tools import MCPRegistry
 from .prompts import AGENT_SYSTEM_PROMPT
-from .streaming_handler import handle_streaming_response
+from .streaming_handler import LazyReply, handle_streaming_response
 from .tools import result_content
+from .typing_indicator import typing
 
 logger = logging.getLogger(__name__)
 
@@ -73,14 +75,54 @@ async def run_agent(
     system_prompt=None,
     save_ai_message=True,
     photos=None,
+    debounce=False,
+    engage=None,
+    edited=False,
+    restarts=0,
 ) -> None:
-    """Run one turn. ``photos`` lists the messages whose photos belong to it (an album)."""
-    if is_message_edit(update):
+    """Run one turn. ``photos`` lists the messages whose photos belong to it (an album).
+
+    ``debounce`` lets a newer relevant message cancel this turn while it has
+    not sent anything yet (see :mod:`sector_ai.debounce`). ``engage`` skips the
+    engagement decision. ``edited`` runs a turn for an edit that restarted one.
+    """
+    if is_message_edit(update) and not edited:
         from .chat_events import handle_message_edit
 
         await handle_message_edit(update, context)
         return
     context.bind_update(update)
+    turn = None
+    if debounce and context.settings.debounce_max_restarts > 0 and not command:
+        # Synchronous, so the finally below always unregisters it.
+        turn = debounce_turns.register(update, context, photos=photos, restarts=restarts, edited=edited)
+    try:
+        if turn is not None:
+            if await debounce_turns.take_over(update, context, turn):
+                engage = True
+            # Turns this one superseded store their messages before it answers.
+            await debounce_turns.wait_for_replaced(turn)
+        await _run_turn(
+            update,
+            context,
+            turn,
+            command=command,
+            prompt=prompt,
+            force=force,
+            ingest=ingest,
+            system_prompt=system_prompt,
+            save_ai_message=save_ai_message,
+            photos=photos,
+            engage=engage,
+        )
+    finally:
+        if turn is not None:
+            debounce_turns.leave(context, turn)
+
+
+async def _run_turn(
+    update, context, turn, *, command, prompt, force, ingest, system_prompt, save_ai_message, photos, engage
+) -> None:
     async with context.conversation_lock:
         await context.remove_pending_placeholder()
         for key in ("active_tool_call_id", "started_tool_call_ids", "interrupted_delivery"):
@@ -90,8 +132,10 @@ async def run_agent(
         context._request_model = model
         tools = {}
         bound_model = None
+        # Posted on the first visible text; never an empty placeholder.
         placeholder = None
-        placeholder_has_text = False
+        # Typing starts once the turn has committed to responding.
+        indicator = contextlib.AsyncExitStack()
         executions = {}
         pending_message = None
         model_key = context._model_config(context.get_model())
@@ -120,38 +164,36 @@ async def run_agent(
             return {"accepted": accepted}
 
         async def engagement_node(state):
-            if force or command:
-                return {"engage": True}
+            if turn is not None and turn.superseded:
+                # A newer message took over; this one is context for its answer.
+                return {"engage": False}
+            result = await decide()
+            if turn is not None:
+                if turn.superseded:
+                    return {"engage": False}
+                turn.engaged = result
+            return {"engage": result}
+
+        async def decide() -> bool:
+            if force or command or engage is True:
+                return True
+            if engage is False:
+                return False
             message = update.effective_message
             date = getattr(message, "date", None)
             if isinstance(date, datetime) and datetime.now(UTC) - date > timedelta(minutes=2):
-                return {"engage": False}
-            reply = getattr(message, "reply_to_message", None)
-            if reply and getattr(getattr(reply, "from_user", None), "id", None) == context.bot.id:
-                return {"engage": True}
+                return False
             # An explicitly addressed bot should not run an LLM just to decide
             # whether it was addressed. Respect autoreply=off for mentions.
-            if context.chat_autoreply_mode:
-                username = await context.get_username()
-                body = message.text or getattr(message, "caption", None) or ""
-                if not isinstance(body, str):
-                    body = ""
-                if re.search(rf"(?<!\w)@{re.escape(username)}(?!\w)", body, re.IGNORECASE):
-                    return {"engage": True}
-            return {"engage": bool(await should_respond(update, context))}
+            if await debounce_turns.addressed_to_bot(update, context):
+                return True
+            return bool(await should_respond(update, context))
 
         async def prepare_node(state):
             nonlocal bound_model, placeholder, pending_message
+            await indicator.enter_async_context(typing(update.effective_message))
             if not command:
-                from .retry import retry_on_network_error
-
-                placeholder = await retry_on_network_error(
-                    lambda: update.effective_message.reply_text("Processing..."),
-                    what="Processing placeholder",
-                )
-                if placeholder is None:
-                    return {"finished": True}
-                context.remember_placeholder(placeholder)
+                placeholder = LazyReply(context, update.effective_message)
             specs = builtin_tools(update, context, model, topic=command == "topic")
             if command or (context.settings.agent_tools_enabled and model_key not in unsupported and not system_prompt):
                 tools.update((tool.name, tool) for tool in specs)
@@ -199,12 +241,11 @@ async def run_agent(
             return {}
 
         async def model_node(state):
-            nonlocal bound_model, placeholder_has_text, pending_message
+            nonlocal bound_model, placeholder, pending_message
             if state.get("iterations", 0) >= context.settings.agent_max_iterations:
                 text = "Stopped after reaching the configured agent iteration limit."
-                await placeholder.edit_text(text)
-                context.save_assistant_message(text, placeholder)
-                placeholder_has_text = True
+                await placeholder.write(text)
+                context.save_assistant_message(text, placeholder.message)
                 return {"finished": True}
             if state.get("tools_blocked") or state.get("calls", 0) >= context.settings.agent_max_tool_calls:
                 bound_model = None
@@ -221,7 +262,6 @@ async def run_agent(
                         "Explain the uncertainty to the user. No more tools are available this turn."
                     )
                 await stream_chat(update, context, final_prompt, save_ai_message, response_message=placeholder)
-                placeholder_has_text = True
                 return {"finished": True}
 
             await context.maybe_compact()
@@ -292,17 +332,24 @@ async def run_agent(
                         call["id"] = uuid4().hex
                     used_ids.add(call["id"])
                 response.additional_kwargs["telegram"] = {"kind": "tool_call", "at": utc_now()}
+                if placeholder is not None and placeholder.message is not None:
+                    # This response's visible text already has its own Telegram
+                    # message. Record its ID so later target checks can tell it
+                    # apart from user messages, then start a fresh reply object
+                    # for the next model step. Reusing the old one would edit
+                    # text the user has already seen.
+                    sent = message_metadata(placeholder.message)
+                    if sent.get("message_id") != getattr(update.effective_message, "message_id", None):
+                        response.additional_kwargs["telegram"].update(sent)
+                    response.additional_kwargs["telegram"]["sender"] = {"is_bot": True}
+                    placeholder = LazyReply(context, update.effective_message)
                 context.chat_message_history.append(response)
                 pending_message = response
-                if delivered_text:
-                    placeholder_has_text = True
                 return {"pending": response.tool_calls, "iterations": state.get("iterations", 0) + 1}
             if delivered_text and save_ai_message:
-                context.save_assistant_message(delivered_text, placeholder)
-                placeholder_has_text = True
+                context.save_assistant_message(delivered_text, placeholder.message)
             elif not state.get("delivered") and not delivered_text:
-                await placeholder.edit_text("The model returned an empty response.")
-                placeholder_has_text = True
+                await placeholder.write("The model returned an empty response.")
             return {"finished": True}
 
         async def tool_node(state):
@@ -326,6 +373,9 @@ async def run_agent(
                             raise ValueError("This tool is not permitted in this conversation.")
                         # Disable JSON Schema's legacy remote-ref retrieval.
                         validator_for(tool.parameters)(tool.parameters, registry=Registry()).validate(call["args"])
+                        # A tool may have side effects; from here the turn is no
+                        # longer cancelled by a newer message.
+                        debounce_turns.commit_or_stop(context)
                         context.conversation_data["active_tool_call_id"] = call["id"]
                         started = context.conversation_data.setdefault("started_tool_call_ids", [])
                         if call["id"] not in started:
@@ -371,25 +421,22 @@ async def run_agent(
             return {"calls": calls, "delivered": delivered, "pending": [], "tools_blocked": blocked}
 
         async def finish_node(state):
-            if placeholder is not None and not placeholder_has_text and state.get("delivered"):
-                try:
-                    await placeholder.delete()
-                    context.clear_pending_placeholder()
-                except Exception:
-                    logger.warning("Could not delete the agent's processing placeholder")
             context.conversation_data.pop("started_tool_call_ids", None)
             context._enforce_history_cap()
             return {}
 
+        # Ingest runs outside the cancellable graph task: a turn superseded by a
+        # newer message still leaves its own message in history.
+        if not (await ingest_node({}))["accepted"]:
+            return
+
         builder = StateGraph(AgentState)
-        builder.add_node("ingest", ingest_node)
         builder.add_node("should_respond", engagement_node)
         builder.add_node("prepare", prepare_node)
         builder.add_node("agent", model_node)
         builder.add_node("tools", tool_node)
         builder.add_node("finish", finish_node)
-        builder.add_edge(START, "ingest")
-        builder.add_conditional_edges("ingest", lambda state: "should_respond" if state["accepted"] else END)
+        builder.add_edge(START, "should_respond")
         builder.add_conditional_edges("should_respond", lambda state: "prepare" if state["engage"] else END)
         builder.add_conditional_edges(
             "prepare", lambda state: "finish" if state.get("finished") else "tools" if command else "agent"
@@ -398,15 +445,47 @@ async def run_agent(
         builder.add_conditional_edges("tools", lambda state: "finish" if command else "agent")
         builder.add_edge("finish", END)
         graph = builder.compile()
-        try:
+
+        async def run_graph():
             async with asyncio.timeout(context.settings.agent_timeout):
                 await graph.ainvoke(
                     {"conversation": context.conversation_data},
                     {"recursion_limit": context.settings.agent_max_iterations * 3 + 12},
                 )
+
+        # A separate task, so a newer relevant message can cancel the work
+        # without cancelling the handler that owns this turn.
+        context._turn = turn
+        graph_task = asyncio.ensure_future(run_graph())
+        if turn is not None:
+            turn.task = graph_task
+        try:
+            try:
+                await graph_task
+            except asyncio.CancelledError:
+                current = asyncio.current_task()
+                if (
+                    turn is not None
+                    and turn.superseded
+                    and graph_task.cancelled()
+                    and not (current is not None and current.cancelling())
+                ):
+                    # Nothing was sent or executed: drop the unanswered tool
+                    # request instead of recording interrupted results.
+                    if pending_message is not None:
+                        _discard_pending(context, pending_message)
+                    logger.info("Turn for message(s) %s was superseded before replying", sorted(turn.message_ids))
+                    return
+                raise
             context.finish_placeholder()
         except Exception as error:
             # A timed-out/cancelled batch must still have a result per call.
+            if turn is not None and turn.superseded and not turn.committed:
+                # It failed while being replaced; the newer turn answers instead.
+                if pending_message is not None:
+                    _discard_pending(context, pending_message)
+                logger.info("Superseded turn ended with an error: %s", error)
+                return
             if pending_message is not None:
                 _close_pending(context, pending_message)
             if isinstance(error, NetworkError) and placeholder is not None:
@@ -417,7 +496,7 @@ async def run_agent(
                 else redact_for_user(str(error), context.settings)
             )
             if placeholder is not None:
-                await placeholder.edit_text(f"Error processing chat response: {text}")
+                await placeholder.write(f"Error processing chat response: {text}")
                 context.finish_placeholder()
             else:
                 await update.effective_message.reply_text(text)
@@ -426,8 +505,25 @@ async def run_agent(
                 _close_pending(context, pending_message)
             raise
         finally:
+            if not graph_task.done():
+                graph_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await graph_task
+            await indicator.aclose()
+            context._turn = None
             context._request_model = None
             context._request_model_name = None
+
+
+def _discard_pending(context, message) -> None:
+    """Remove a tool request whose tools never started; it had no effect."""
+    history = context.chat_message_history
+    for index, item in enumerate(history):
+        if item is message:
+            del history[index]
+            break
+    for key in ("active_tool_call_id", "started_tool_call_ids", "interrupted_delivery"):
+        context.conversation_data.pop(key, None)
 
 
 def _tool_termination_error(message) -> str | None:

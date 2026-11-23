@@ -92,8 +92,8 @@ async def test_compact_cmd_reports_the_token_change(make_context, make_update, m
 
     await compact_cmd(update, context)
 
-    assert update.message.texts("reply_text") == ["Compacting..."]
-    assert update.message.texts("edit_text") == ["Compacted 4 messages into a summary: 900 → 120 tokens."]
+    assert update.message.shown() == ["Compacted 4 messages into a summary: 900 → 120 tokens."]
+    assert update.message.typing_count() >= 1
 
 
 async def test_compact_cmd_needs_something_to_compact(make_context, make_update, monkeypatch):
@@ -108,7 +108,7 @@ async def test_compact_cmd_needs_something_to_compact(make_context, make_update,
 
     await compact_cmd(update, context)
 
-    assert update.message.texts("edit_text") == ["Not enough history to compact yet."]
+    assert update.message.shown() == ["Not enough history to compact yet."]
 
 
 async def test_compact_cmd_reports_a_failure(make_context, make_update, monkeypatch):
@@ -119,7 +119,7 @@ async def test_compact_cmd_reports_a_failure(make_context, make_update, monkeypa
 
     await compact_cmd(update, context)
 
-    assert update.message.texts("edit_text") == ["Compaction failed; the history was left unchanged. Check the logs."]
+    assert update.message.shown() == ["Compaction failed; the history was left unchanged. Check the logs."]
 
 
 async def test_compact_cmd_is_admin_only(make_context, make_update, monkeypatch):

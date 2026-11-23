@@ -13,6 +13,7 @@ from .chat_metadata import instruction_messages, strip_internal_envelope, with_c
 from .history import record_content_command
 from .message_text import message_refused, message_text
 from .sector_context import SectorContext
+from .typing_indicator import typing
 from .usage import record_usage
 
 logger = logging.getLogger(__name__)
@@ -69,8 +70,13 @@ async def code_cmd(update: Update, context: SectorContext) -> None:
         ),
         context,
     )
+    async with typing(update.message):
+        await _reply_with_code(update, context, messages)
+
+
+async def _reply_with_code(update: Update, context: SectorContext, messages) -> None:
     model = context.bind_cache(context.bot_llm, "code")
-    for i in range(3):
+    for _ in range(3):
         message = await model.ainvoke(messages)
         record_usage(context, "code", message)
         if message_refused(message):

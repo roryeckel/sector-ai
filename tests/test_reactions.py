@@ -12,7 +12,7 @@ from sector_ai.capabilities import builtin_tools
 from sector_ai.reactions import (
     ALLOWED_REACTIONS,
     canonical_reaction,
-    last_bot_message_id,
+    own_message_ids,
     reaction_tool,
     resolve_target,
 )
@@ -49,39 +49,6 @@ def test_resolve_target_accepts_an_explicit_message_id(make_context, make_update
         resolve_target(context, update, {"message_id": True})
 
 
-def test_resolve_target_uses_the_newest_bot_text(make_context, make_update):
-    context = make_context()
-    context.chat_message_history.extend(
-        [
-            AIMessage(
-                content="older",
-                additional_kwargs={"telegram": {"message_id": 41, "sender": {"is_bot": True}}},
-            ),
-            AIMessage(
-                content="newest",
-                additional_kwargs={"telegram": {"message_id": 43, "sender": {"is_bot": True}}},
-            ),
-            AIMessage(
-                content="a person",
-                additional_kwargs={"telegram": {"message_id": 44, "sender": {"id": 99}}},
-            ),
-        ]
-    )
-    update = make_update(text="hello", message_id=77)
-
-    assert last_bot_message_id(context) == 43
-    assert resolve_target(context, update, {"target": "last_bot"}) == 43
-
-
-def test_resolve_target_last_bot_requires_an_earlier_bot_message(make_context, make_update):
-    context = make_context()
-    update = make_update(text="hello", message_id=77)
-
-    assert last_bot_message_id(context) is None
-    with pytest.raises(ValueError, match="earlier bot message"):
-        resolve_target(context, update, {"target": "last_bot"})
-
-
 def test_resolve_target_uses_the_replied_to_message(make_context, make_update):
     context = make_context()
     update = make_update(text="hello", message_id=77, reply_to_message=SimpleNamespace(message_id=33))
@@ -90,7 +57,27 @@ def test_resolve_target_uses_the_replied_to_message(make_context, make_update):
     with pytest.raises(ValueError, match="not a reply"):
         resolve_target(context, make_update(text="hello", message_id=78), {"target": "reply_to"})
     with pytest.raises(ValueError, match="Unknown reaction target"):
+        resolve_target(context, update, {"target": "last_bot"})
+    with pytest.raises(ValueError, match="Unknown reaction target"):
         resolve_target(context, update, {"target": "previous"})
+
+
+def test_bot_message_ids_are_known_from_history(make_context):
+    context = make_context()
+    context.chat_message_history.extend(
+        [
+            AIMessage(
+                content="older",
+                additional_kwargs={"telegram": {"message_id": 41, "sender": {"is_bot": True}}},
+            ),
+            AIMessage(
+                content="a person",
+                additional_kwargs={"telegram": {"message_id": 44, "sender": {"id": 99}}},
+            ),
+        ]
+    )
+
+    assert own_message_ids(context) == {41}
 
 
 async def test_reaction_tool_defaults_to_the_current_message(make_context, make_update):
@@ -102,10 +89,73 @@ async def test_reaction_tool_defaults_to_the_current_message(make_context, make_
 
     assert result["status"] == "delivered"
     assert result["reaction"] == {"emoji": "👍", "message_id": 77, "status": "delivered"}
+    # The receipt says whose message it changed and what that message says, so
+    # the model can describe the action instead of guessing.
+    assert result["target"]["sender"]["username"] == "testuser"
+    assert result["target"]["excerpt"] == "react"
+    assert "testuser's message" in result["note"]
+    assert '"react"' in result["note"]
     kwargs = context.bot.set_message_reaction.await_args.kwargs
     assert kwargs["chat_id"] == 1
     assert kwargs["message_id"] == 77
     assert kwargs["reaction"][0].emoji == "👍"
+
+
+async def test_a_reaction_on_its_own_message_is_allowed_and_labeled(make_context, make_update):
+    context = make_context()
+    context.chat_message_history.append(
+        AIMessage(
+            content="my own message",
+            additional_kwargs={"telegram": {"message_id": 43, "sender": {"is_bot": True}}},
+        )
+    )
+    tool = reaction_tool(make_update(text="react", message_id=77), context)
+
+    result = await tool.invoke({"emoji": "🔥", "message_id": 43})
+
+    assert result["status"] == "delivered"
+    assert result["target"]["own_message"] is True
+    assert "your own message 43" in result["note"]
+    assert context.bot.set_message_reaction.await_args.kwargs["message_id"] == 43
+
+
+async def test_a_reply_to_its_own_message_is_labeled_as_its_own(make_context, make_update):
+    context = make_context()
+    reply = SimpleNamespace(
+        message_id=43,
+        text="my own message",
+        from_user=SimpleNamespace(id=42, username="testbot", is_bot=True),
+    )
+    tool = reaction_tool(make_update(text="react", message_id=77, reply_to_message=reply), context)
+
+    result = await tool.invoke({"emoji": "🔥", "target": "reply_to"})
+
+    assert result["status"] == "delivered"
+    assert result["target"]["own_message"] is True
+    assert result["target"]["sender"]["is_bot"] is True
+    assert "your own message" in result["note"]
+
+
+async def test_artifacts_the_bot_sent_count_as_its_own_after_history_drops_them(make_context, make_update):
+    # A poll or image is recorded when sent, so a reaction on it is labeled
+    # correctly even with no history entry for that message.
+    context = make_context()
+    context.remember_sent(SimpleNamespace(message_id=55))
+    tool = reaction_tool(make_update(text="react", message_id=77), context)
+
+    result = await tool.invoke({"emoji": "🔥", "message_id": 55})
+
+    assert result["target"]["own_message"] is True
+
+
+async def test_a_user_message_is_not_labeled_as_its_own(make_context, make_update):
+    context = make_context()
+    tool = reaction_tool(make_update(text="react", message_id=77), context)
+
+    result = await tool.invoke({"emoji": "🔥"})
+
+    assert "own_message" not in result["target"]
+    assert "your own" not in result["note"]
 
 
 async def test_reaction_tool_accepts_an_explicit_past_message(make_context, make_update):
@@ -207,4 +257,5 @@ def test_builtin_tools_expose_the_reaction_without_text(make_context, make_updat
     parameters = reaction.schema["function"]["parameters"]
     assert parameters["required"] == ["emoji"]
     assert parameters["properties"]["emoji"]["enum"] == list(ALLOWED_REACTIONS)
+    assert parameters["properties"]["target"]["enum"] == ["current", "reply_to"]
     assert "text" not in parameters["properties"]

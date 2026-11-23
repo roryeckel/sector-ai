@@ -7,7 +7,7 @@ import pytest
 from langchain_core.messages import AIMessageChunk
 from telegram.error import BadRequest, NetworkError
 
-from sector_ai.streaming_handler import handle_streaming_response
+from sector_ai.streaming_handler import LazyReply, handle_streaming_response
 
 
 @pytest.fixture
@@ -256,6 +256,20 @@ async def test_remove_pending_placeholder_deletes_the_message(make_context):
     assert "placeholder_unsettled" not in context.conversation_data
 
 
+async def test_a_later_reply_does_not_forget_an_earlier_cursor_left_behind(make_context):
+    context = make_context()
+    context.remember_placeholder(SimpleNamespace(message_id=42))
+    context.mark_placeholder_unsettled()  # its final edit failed
+
+    context.remember_placeholder(SimpleNamespace(message_id=43))
+    context.finish_placeholder()
+    await context.remove_pending_placeholder()
+
+    deleted = [call.kwargs["message_id"] for call in context.bot.delete_message.await_args_list]
+    assert deleted == [42]
+    assert "abandoned_placeholders" not in context.conversation_data
+
+
 async def test_streaming_records_provider_cache_usage(make_context, recording_message, quiet_settings):
     context = make_context(settings=quiet_settings)
     message = recording_message()
@@ -384,6 +398,65 @@ async def test_streaming_reports_a_refusal_finish(make_context, recording_messag
 
     assert response == ""
     assert message.texts("edit_text")[-1] == "The model refused the request."
+
+
+async def test_lazy_reply_is_posted_with_the_first_text(make_context, recording_message, fast_settings):
+    context = make_context(settings=fast_settings)
+    source = recording_message()
+    source.message_id = 9
+    cursor = context.settings.streaming_cursor
+    reply = LazyReply(context, source)
+
+    response = await handle_streaming_response(context, reply, aiter_chunks(chunks(" ", "\n", "Hello")), "Chat")
+
+    assert response == "Hello"
+    # Whitespace never produced a cursor-only message; the post carries text.
+    assert source.texts("reply_text") == ["Hello" + cursor]
+    assert source.texts("edit_text") == ["Hello"]
+    assert reply.message is source
+    assert context.conversation_data["pending_placeholder"]["message_id"] == 9
+
+
+async def test_tool_only_stream_posts_nothing(make_context, recording_message, fast_settings):
+    context = make_context(settings=fast_settings)
+    source = recording_message()
+    reply = LazyReply(context, source)
+
+    # Tool-call chunks carry no text, but the update timer still fires.
+    response = await handle_streaming_response(
+        context, reply, aiter_chunks(chunks("", "", "")), "Agent", allow_empty=True
+    )
+
+    assert response == ""
+    assert source.shown() == []
+    assert reply.message is None
+
+
+async def test_a_later_round_never_shows_a_bare_cursor(make_context, recording_message, fast_settings):
+    context = make_context(settings=fast_settings)
+    message = recording_message()
+    cursor = context.settings.streaming_cursor
+    reply = LazyReply(context, message=message)
+
+    await handle_streaming_response(context, reply, aiter_chunks(chunks("", "", "Next")), "Agent", allow_empty=True)
+
+    edits = message.texts("edit_text")
+    assert cursor not in [text.strip() for text in edits]
+    assert edits == ["Next" + cursor, "Next"]
+
+
+async def test_an_error_before_any_text_is_posted_as_a_reply(make_context, recording_message):
+    context = make_context()
+    source = recording_message()
+
+    async def exploding():
+        raise RuntimeError("boom")
+        yield  # pragma: no cover
+
+    response = await handle_streaming_response(context, LazyReply(context, source), exploding(), "Chat")
+
+    assert response == ""
+    assert source.texts("reply_text") == ["Error processing chat: boom"]
 
 
 async def test_pending_update_cancelled_on_error(make_context, recording_message, fast_settings):
