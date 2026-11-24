@@ -79,6 +79,180 @@ def test_timestamps_are_utc_and_reply_excerpt_is_bounded():
     assert len(metadata["reply_to"]["excerpt"]) == 600
 
 
+def forward_of(**origin):
+    return SimpleNamespace(
+        message_id=5,
+        date=datetime(2026, 11, 22, 8, tzinfo=UTC),
+        from_user=SimpleNamespace(id=7, username="forwarder"),
+        forward_origin=SimpleNamespace(**origin),
+        text="forwarded text",
+    )
+
+
+def test_a_forwarded_message_keeps_the_forwarder_and_records_the_origin():
+    metadata = message_metadata(
+        forward_of(
+            type="user",
+            date=datetime(2026, 11, 21, 9, tzinfo=UTC),
+            sender_user=SimpleNamespace(id=5, username="bob", full_name="Bob"),
+        )
+    )
+
+    assert metadata["sender"] == {"id": 7, "username": "forwarder"}
+    assert metadata["forward"] == {
+        "kind": "user",
+        "sent_at": "2026-11-21T09:00:00Z",
+        "sender": {"id": 5, "username": "bob", "display_name": "Bob"},
+    }
+
+
+def test_a_channel_forward_records_the_channel_message_and_signature():
+    metadata = message_metadata(
+        forward_of(
+            type="channel",
+            date=datetime(2026, 11, 21, 9, tzinfo=UTC),
+            chat=SimpleNamespace(id=-1009, type="channel", title="News"),
+            message_id=42,
+            author_signature="Editor",
+        )
+    )
+
+    forward = metadata["forward"]
+    assert forward["kind"] == "channel"
+    assert forward["chat"] == {"id": -1009, "type": "channel", "display_name": "News"}
+    assert forward["message_id"] == 42
+    assert forward["author_signature"] == "Editor"
+    assert "sender" not in forward
+
+
+def test_a_hidden_forwarder_gives_only_the_name_telegram_sends():
+    metadata = message_metadata(
+        forward_of(type="hidden_user", date=datetime(2026, 11, 21, 9, tzinfo=UTC), sender_user_name="Mystery")
+    )
+
+    assert metadata["forward"] == {
+        "kind": "hidden_user",
+        "sent_at": "2026-11-21T09:00:00Z",
+        "sender": {"display_name": "Mystery"},
+    }
+
+
+def test_an_automatic_channel_post_is_attributed_to_the_channel_and_marked():
+    message = SimpleNamespace(
+        message_id=5,
+        date=datetime(2026, 11, 22, 8, tzinfo=UTC),
+        from_user=SimpleNamespace(id=136817688, username="Channel_Bot", is_bot=True),
+        sender_chat=SimpleNamespace(id=-1009, type="channel", title="News"),
+        is_automatic_forward=True,
+        text="channel post",
+    )
+    metadata = message_metadata(message)
+
+    assert metadata["sender"] == {"id": -1009, "type": "channel", "display_name": "News"}
+    assert metadata["forward"] == {"automatic": True}
+
+
+def test_an_anonymous_admin_is_the_group_not_the_placeholder_user():
+    message = SimpleNamespace(
+        message_id=5,
+        from_user=SimpleNamespace(id=1087968824, username="GroupAnonymousBot", full_name="Group", is_bot=True),
+        sender_chat=SimpleNamespace(id=-1001, type="supergroup", title="Bepis"),
+        text="posted as the group",
+    )
+    assert message_metadata(message)["sender"] == {"id": -1001, "type": "supergroup", "display_name": "Bepis"}
+
+
+def test_a_quoted_reply_records_the_quote_and_a_replied_photo():
+    reply = SimpleNamespace(
+        message_id=77,
+        date=datetime(2026, 11, 21, 9, tzinfo=UTC),
+        text="a long message with many lines " * 20,
+        from_user=SimpleNamespace(id=5, username="bob"),
+        photo=[SimpleNamespace(file_id="small")],
+    )
+    message = SimpleNamespace(
+        message_id=5,
+        date=datetime(2026, 11, 22, 8, tzinfo=UTC),
+        from_user=SimpleNamespace(id=7, username="forwarder"),
+        reply_to_message=reply,
+        quote=SimpleNamespace(text="the line I mean", position=120, is_manual=True),
+        text="this one",
+    )
+    target = message_metadata(message)["reply_to"]
+
+    assert target["sender"]["username"] == "bob"
+    assert target["quote"] == "the line I mean"
+    assert target["photo"] is True
+    assert len(target["excerpt"]) == 600
+
+
+def test_a_quote_without_a_reply_target_is_not_an_envelope_field():
+    message = SimpleNamespace(
+        message_id=5,
+        from_user=SimpleNamespace(id=7, username="forwarder"),
+        quote=SimpleNamespace(text="orphaned quote"),
+        text="hello",
+    )
+    assert "reply_to" not in message_metadata(message)
+
+
+def test_a_reply_from_another_chat_records_the_source_chat_and_sender():
+    external = SimpleNamespace(
+        message_id=77,
+        chat=SimpleNamespace(id=-1002, type="channel", title="Elsewhere"),
+        origin=SimpleNamespace(
+            type="hidden_user", date=datetime(2026, 11, 21, 9, tzinfo=UTC), sender_user_name="Someone"
+        ),
+        photo=[SimpleNamespace(file_id="small")],
+    )
+    message = SimpleNamespace(
+        message_id=5,
+        from_user=SimpleNamespace(id=7, username="forwarder"),
+        external_reply=external,
+        quote=SimpleNamespace(text="the part answered"),
+        text="replying across chats",
+    )
+    target = message_metadata(message)["reply_to"]
+
+    assert target["message_id"] == 77
+    assert target["sent_at"] == "2026-11-21T09:00:00Z"
+    assert target["sender"] == {"display_name": "Someone"}
+    assert target["chat"] == {"id": -1002, "type": "channel", "display_name": "Elsewhere"}
+    # Telegram sends no text of a message from another chat, only its origin.
+    assert "excerpt" not in target
+    assert target["quote"] == "the part answered"
+    assert target["photo"] is True
+
+
+def test_a_long_quote_is_bounded_like_an_excerpt():
+    reply = SimpleNamespace(message_id=77, text="target", from_user=SimpleNamespace(id=5, username="bob"))
+    message = SimpleNamespace(
+        message_id=5,
+        from_user=SimpleNamespace(id=7, username="forwarder"),
+        reply_to_message=reply,
+        quote=SimpleNamespace(text="q" * 10000),
+        text="this one",
+    )
+    assert len(message_metadata(message)["reply_to"]["quote"]) == 600
+
+
+def test_forward_metadata_reaches_the_model(make_context, make_update):
+    context = make_context()
+    update = enrich(make_update(text="look at this", username="alice"))
+    update.message.forward_origin = SimpleNamespace(
+        type="user", date=datetime(2026, 11, 21, 9, tzinfo=UTC), sender_user=SimpleNamespace(id=5, username="bob")
+    )
+    context.bind_update(update)
+    context.save_user_message(update.message)
+
+    messages = context.get_templated_messages().format_messages(USERNAME="bot", MAX_LEN=4096)
+    transcript = "\n".join(message.content for message in messages)
+    assert '"forward"' in transcript
+    assert '"kind":"user"' in transcript
+    assert '"username":"bob"' in transcript
+    assert "alice: look at this" in transcript
+
+
 def test_metadata_rendering_is_idempotent_and_preserves_tool_protocol():
     message = ToolMessage(
         content='{"status":"delivered"}',

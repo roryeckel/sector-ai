@@ -48,6 +48,10 @@ def actor_metadata(user) -> dict:
     identifier = getattr(user, "id", None)
     if type(identifier) is int:
         result["id"] = identifier
+    # Chats carry their type; users do not have this attribute.
+    kind = getattr(user, "type", None)
+    if isinstance(kind, str) and kind:
+        result["type"] = kind
     for key, attribute in (("username", "username"), ("display_name", "full_name")):
         value = text_value(getattr(user, attribute, None))
         if value:
@@ -55,6 +59,123 @@ def actor_metadata(user) -> dict:
     if type(getattr(user, "is_bot", None)) is bool:
         result["is_bot"] = user.is_bot
     return result
+
+
+def chat_metadata(chat) -> dict:
+    """A chat used as a sender: its id, username, title and chat type."""
+    result = actor_metadata(chat)
+    title = text_value(getattr(chat, "title", None))
+    if title:
+        result["display_name"] = title
+    return result
+
+
+def origin_metadata(origin) -> dict:
+    """The original sender, date and signature a MessageOrigin names."""
+    result = {}
+    date = utc_timestamp(getattr(origin, "date", None))
+    if date:
+        result["sent_at"] = date
+    user = getattr(origin, "sender_user", None)
+    if user is not None:
+        sender = actor_metadata(user)
+        if sender:
+            result["sender"] = sender
+    else:
+        name = text_value(getattr(origin, "sender_user_name", None))
+        if name:
+            result["sender"] = {"display_name": name}
+    signature = text_value(getattr(origin, "author_signature", None))
+    if signature:
+        result["author_signature"] = signature
+    return result
+
+
+def origin_chat(origin):
+    return getattr(origin, "sender_chat", None) or getattr(origin, "chat", None)
+
+
+def forward_metadata(message) -> dict:
+    """Where a forwarded message came from, as Telegram reports it.
+
+    The forwarder stays the sender of the message in this chat; this block
+    names the original author, chat, date and signature. A user who hid their
+    account in forwards gives a display name only, because Telegram sends no
+    more. ``is_automatic_forward`` marks a channel post mirrored into its
+    discussion group, which has no ``forward_origin``.
+    """
+    origin = getattr(message, "forward_origin", None)
+    automatic = getattr(message, "is_automatic_forward", None) is True
+    if origin is None and not automatic:
+        return {}
+    result = {}
+    if origin is not None:
+        kind = getattr(origin, "type", None)
+        if isinstance(kind, str) and kind:
+            result["kind"] = kind
+        result.update(origin_metadata(origin))
+        chat = origin_chat(origin)
+        if chat is not None and "sender" not in result:
+            result["chat"] = chat_metadata(chat)
+        identifier = getattr(origin, "message_id", None)
+        if type(identifier) is int:
+            result["message_id"] = identifier
+    if automatic:
+        result["automatic"] = True
+    return result
+
+
+def has_photo(message) -> bool:
+    photos = getattr(message, "photo", None)
+    return isinstance(photos, (list, tuple)) and bool(photos)
+
+
+def external_reply_metadata(external) -> dict:
+    """A reply target from another chat or topic (``ExternalReplyInfo``).
+
+    Telegram sends no text for these, only the origin, source chat, message ID
+    and media type, so there is no excerpt to record.
+    """
+    result = {}
+    identifier = getattr(external, "message_id", None)
+    if type(identifier) is int:
+        result["message_id"] = identifier
+    origin = getattr(external, "origin", None)
+    if origin is not None:
+        result.update(origin_metadata(origin))
+    chat = getattr(external, "chat", None) or (origin_chat(origin) if origin is not None else None)
+    if chat is not None:
+        result["chat"] = chat_metadata(chat)
+    if has_photo(external):
+        result["photo"] = True
+    return result
+
+
+def reply_metadata(message) -> dict:
+    """The message being answered, in this chat or through ``external_reply``.
+
+    One level only: the target's own reply is not expanded. A partial quote is
+    recorded, because the excerpt starts at the beginning of the target's text.
+    """
+    reply = getattr(message, "reply_to_message", None)
+    external = None
+    if reply is not None:
+        target = message_metadata(reply, include_reply=False)
+        excerpt = text_value(getattr(reply, "text", None), 600) or text_value(getattr(reply, "caption", None), 600)
+        if excerpt:
+            target["excerpt"] = excerpt
+        if has_photo(reply):
+            target["photo"] = True
+    else:
+        external = getattr(message, "external_reply", None)
+        if external is None:
+            return {}
+        target = external_reply_metadata(external)
+    quote = getattr(message, "quote", None)
+    quoted = text_value(getattr(quote, "text", None), 600)
+    if quoted:
+        target["quote"] = quoted
+    return target
 
 
 def message_metadata(message, *, include_reply=True) -> dict:
@@ -66,21 +187,20 @@ def message_metadata(message, *, include_reply=True) -> dict:
         value = utc_timestamp(getattr(message, attribute, None))
         if value:
             result[key] = value
-    sender = actor_metadata(getattr(message, "from_user", None))
-    if not sender:
-        sender_chat = getattr(message, "sender_chat", None)
-        sender = actor_metadata(sender_chat)
-        title = text_value(getattr(sender_chat, "title", None))
-        if title:
-            sender["display_name"] = title
+    # Telegram puts a placeholder user in ``from`` when a message is sent on
+    # behalf of a chat (anonymous admins, channel posts), so the chat wins
+    # whenever it is present.
+    sender_chat = getattr(message, "sender_chat", None)
+    sender = (
+        chat_metadata(sender_chat) if sender_chat is not None else actor_metadata(getattr(message, "from_user", None))
+    )
     if sender:
         result["sender"] = sender
-    reply = getattr(message, "reply_to_message", None)
-    if include_reply and reply:
-        target = message_metadata(reply, include_reply=False)
-        excerpt = text_value(getattr(reply, "text", None), 600) or text_value(getattr(reply, "caption", None), 600)
-        if excerpt:
-            target["excerpt"] = excerpt
+    forward = forward_metadata(message)
+    if forward:
+        result["forward"] = forward
+    if include_reply:
+        target = reply_metadata(message)
         if target:
             result["reply_to"] = target
     return result

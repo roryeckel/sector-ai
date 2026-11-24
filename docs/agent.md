@@ -95,11 +95,20 @@ whose creation/rename it did not see. Metadata is kept in process with the
 conversation, not in a separate memory database.
 
 Model-visible message envelopes contain available message IDs, UTC send/edit
-timestamps, sender ID/username/display name, and explicit reply targets. Reply
-targets include their sender, timestamp and up to 600 characters of text/caption,
-even for replies to other people or messages outside retained history. The bot
-does not fetch the entire reply chain. Assistant replies and tool events also
-carry timestamps. Compaction is instructed to preserve important dates and reply
+timestamps, sender ID/username/display name/chat type, and explicit reply targets.
+Anonymous admins and channel posts are attributed to the sending chat, not to
+Telegram's placeholder `from` user. A forwarded message keeps the forwarder as the
+sender of this chat's message and adds a `forward` block naming the original author
+or chat, the original date, message ID and author signature; a channel post
+automatically mirrored into its discussion group is marked `automatic`. Telegram
+sends only a display name for a user who hid their account in forwards, so no ID or
+username exists to recover. Reply targets include their sender, timestamp and up to
+600 characters of text/caption, even for replies to other people, other chats, other
+topics or messages outside retained history. Cross-chat targets carry the source
+chat and sender, but Telegram sends no text for them; a quoted reply records the
+quoted text, and a replied photo is marked but not downloaded. The bot does not
+fetch the entire reply chain. Assistant replies and tool events also carry
+timestamps. Compaction is instructed to preserve important dates and reply
 relationships, but cannot guarantee verbatim retention of every metadata field.
 
 Assistant messages are shown to the model without their own `[telegram ...]`
