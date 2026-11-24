@@ -551,9 +551,22 @@ class SectorContext(CallbackContext):
     # Methods
 
     async def get_username(self) -> str:
+        """The bot's @username, read from the profile cached at startup.
+
+        ``Application.initialize`` calls ``get_me`` before polling, so the bot's
+        user is already known and this needs no request. Asking Telegram again
+        put a network round trip on the engagement path of every message, and a
+        connect timeout there failed the turn instead of answering it.
+        """
         if self._username:
             return self._username
-        me = await self.application.bot.get_me()
+        bot = self.application.bot
+        username = getattr(bot, "username", None)
+        if username:
+            self._username = username
+            return username
+        # Only before the application is initialized, or with a stub bot.
+        me = await bot.get_me()
         self._username = me.username
         return self._username
 

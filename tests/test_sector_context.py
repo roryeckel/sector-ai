@@ -724,6 +724,19 @@ async def test_get_username_is_cached(make_context):
     assert len(calls) == 1
 
 
+async def test_get_username_reads_the_profile_cached_at_startup(make_context):
+    """No Telegram request on the engagement path; a connect timeout killed the turn."""
+    context = make_context("unused")
+
+    async def get_me():
+        raise AssertionError("get_username must not ask Telegram after startup")
+
+    context.application.bot.username = "cached_bot"
+    context.application.bot.get_me = get_me
+
+    assert await context.get_username() == "cached_bot"
+
+
 async def test_get_model_details_returns_empty_on_failure(make_context):
     context = make_context("unused")
 
