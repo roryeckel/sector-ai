@@ -120,9 +120,11 @@ def test_assistant_envelopes_are_not_repeated_in_prompts_but_human_ones_are():
         ('[telegram {"message_id":1}', ""),
         ("Here is a [telegram {...}] example", "Here is a [telegram {...}] example"),
         ("[telegram docs]\nHello", "[telegram docs]\nHello"),
+        ('Say [telegram {"message_id":1,"sender":{"is_bot":true}}] now', "Say  now"),
+        ('line one\n[telegram {"message_id":1}]\nline two', "line one\nline two"),
     ],
 )
-def test_internal_envelopes_are_stripped_only_at_the_start(text, expected):
+def test_internal_envelopes_are_stripped_from_model_output(text, expected):
     assert strip_internal_envelope(text) == expected
 
 

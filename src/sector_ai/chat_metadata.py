@@ -130,30 +130,73 @@ def render_prompt_message(message):
     return render_metadata(message)
 
 
-def strip_internal_envelope(text: str) -> str:
-    """Remove leading ``[telegram {...}]`` markers from model output.
+def _envelope_end(text: str, start: int) -> tuple[int | None, bool]:
+    """End of the ``[telegram {...}]`` marker at ``start``, and whether it is partial.
 
-    An incomplete marker is held back rather than streamed, so a model that
-    starts reproducing the envelope cannot leak a partial line to Telegram.
+    ``(None, True)`` means it looks like the beginning of a marker but has not
+    arrived completely yet, so it must not be shown until it does.
+    """
+    pos = start + len("[telegram ")
+    while pos < len(text) and text[pos].isspace():
+        pos += 1
+    if pos >= len(text):
+        return None, True
+    if text[pos] != "{":
+        return None, False
+    try:
+        _, end = json.JSONDecoder().raw_decode(text, pos)
+    except ValueError:
+        # Incomplete JSON is held back only while the marker has no closing
+        # bracket yet; "{\"...\"}" in prose is ordinary text, not an envelope.
+        return None, "]" not in text[pos:]
+    while end < len(text) and text[end].isspace():
+        end += 1
+    if end >= len(text):
+        return None, True
+    if text[end] != "]":
+        return None, False
+    return end + 1, False
+
+
+def strip_internal_envelope(text: str) -> str:
+    """Remove every ``[telegram {...}]`` marker from model output.
+
+    Models copy the envelope they see on incoming messages, and often place it
+    after a first sentence or at the end rather than at the start. A partial
+    marker at the end of the stream is held back instead of shown to Telegram.
     The JSON decoder handles brackets and braces inside quoted labels.
     """
     text = text.lstrip()
     prefix = "[telegram "
-    while text.startswith(prefix):
-        payload = text[len(prefix) :].lstrip()
-        if not payload.startswith("{"):
+    parts = []
+    index = 0
+    while True:
+        start = text.find(prefix, index)
+        if start < 0:
+            parts.append(text[index:])
             break
-        try:
-            _, end = json.JSONDecoder().raw_decode(payload)
-        except ValueError:
-            return ""
-        rest = payload[end:].lstrip()
-        if not rest:
-            return ""
-        if not rest.startswith("]"):
-            break
-        text = rest[1:].lstrip()
-    return text
+        end, partial = _envelope_end(text, start)
+        if end is None:
+            if partial:
+                # Hold the unfinished marker back, and everything after it.
+                parts.append(text[index:start])
+                return "".join(parts).rstrip()
+            # A literal "[telegram ..." that is not an envelope: keep it.
+            parts.append(text[index : start + len(prefix)])
+            index = start + len(prefix)
+            continue
+        parts.append(text[index:start])
+        index = end
+        if start == 0:
+            # The reply began with the marker: drop the space or empty line it
+            # left behind, as the marker used to be lstripped away.
+            while index < len(text) and text[index].isspace():
+                index += 1
+        elif text.startswith("\r\n", index):
+            index += 2
+        elif text.startswith("\n", index):
+            index += 1
+    return "".join(parts)
 
 
 def context_messages(now: str, chat: dict, topic: dict, bot_membership=None):

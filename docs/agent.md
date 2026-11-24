@@ -104,9 +104,12 @@ relationships, but cannot guarantee verbatim retention of every metadata field.
 
 Assistant messages are shown to the model without their own `[telegram ...]`
 envelope. Repeating that envelope on the model's prior output taught it to
-imitate the marker. The trust note explicitly forbids reproducing it, and any
-leading envelope is removed before delivery, including during streaming. A
-legitimate marker later in the text is left alone.
+imitate the marker. The trust note explicitly forbids reproducing it, and every
+complete envelope is removed before delivery, wherever it appears and during
+streaming, with the line break it leaves behind. A partial envelope at the end
+of the stream is held back until it completes or the reply ends, so a model
+copying one cannot leak it mid-message. Text that merely looks like a marker
+(such as `[telegram docs]`, or braces that are not JSON) is left alone.
 
 Joins/leaves, pins, chat-title changes, and forum-topic create/edit/close/reopen
 service messages are recorded as attributed events. They never start agent turns
