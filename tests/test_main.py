@@ -235,8 +235,10 @@ def test_main_registers_every_command(tmp_path, monkeypatch):
 
     assert commands == EXPECTED_COMMANDS
     assert any(isinstance(handler, CallbackQueryHandler) for handler in application.handlers)
-    assert len([handler for handler in application.handlers if isinstance(handler, MessageHandler)]) == 4
+    # Edits, text, photos, animations, GIF documents and chat events.
+    assert len([handler for handler in application.handlers if isinstance(handler, MessageHandler)]) == 6
     assert any(handler.callback is entrypoint.handle_chat_event for handler in application.handlers)
+    assert any(handler.callback is entrypoint.handle_animation for handler in application.handlers)
     assert application.handlers[0].callback is entrypoint.handle_edited_message
     # Every handler runs concurrently: a newer message can supersede an
     # unanswered turn, and one waiting on a conversation lock (a command, an

@@ -3,6 +3,7 @@ import logging
 from telegram import Update
 
 from .decision import make_decision
+from .gifs import message_animation
 from .history import scoped_control
 from .retry import retry_on_network_error
 from .sector_context import SectorContext
@@ -18,8 +19,9 @@ async def should_respond(update: Update, context: SectorContext) -> bool | str:
         text = ""
     photos = getattr(message, "photo", None)
     has_photo = isinstance(photos, (list, tuple)) and bool(photos)
-    if context.chat_autoreply_mode and (text or has_photo) and not text.startswith("/"):
-        incoming = text or "[photo without a caption]"
+    has_animation = message_animation(message) is not None
+    if context.chat_autoreply_mode and (text or has_photo or has_animation) and not text.startswith("/"):
+        incoming = text or ("[gif without a caption]" if has_animation else "[photo without a caption]")
         try:
             context.bind_update(update)
             should_respond = await retry_on_network_error(

@@ -83,6 +83,12 @@ Photos are ordinary messages in the conversation. They go through the same autor
 
 An album is collected until no new photo has arrived for `SECTOR_AI_ALBUM_WAIT` seconds, capped at 10 seconds after its first photo (or the configured wait, if longer), and answered as one turn. Photos count toward the context window by size (about one token per `SECTOR_AI_IMAGE_PATCH_PX`² pixels), so compaction triggers on time. Compaction keeps `SECTOR_AI_IMAGE_HISTORY_LIMIT` earlier photos attached and turns older ones into text markers; the model's earlier replies about them remain. `SECTOR_AI_IMAGE_MAX_ATTACHED` caps attached photos per request, for servers that limit images per prompt. Tools that call a model themselves, such as `generate_svg`, see the photo marker and the conversation, not the pixels.
 
+### GIFs
+
+Telegram delivers a GIF as a short MP4 (plus a still thumbnail); the model reads images, not video. The bot samples up to `SECTOR_AI_GIF_MAX_FRAMES` frames (8) at `SECTOR_AI_GIF_FRAME_SIDE` pixels (480) with ffmpeg and attaches them exactly like photos, so later turns and follow-ups can refer to the motion. One marker describes the whole GIF, e.g. `[gif, 480x270, 2s, 8 frames: attached]`.
+
+Sampling requires ffmpeg (`SECTOR_AI_FFMPEG_PATH`, or `ffmpeg` on `PATH`). Without it, or for a file over `SECTOR_AI_GIF_MAX_BYTES`, a failed download or a decode timeout, the thumbnail is kept as one still and the marker says `still preview only`; `SECTOR_AI_GIF_MAX_FRAMES=0` selects still-only deliberately. Frames count individually toward the image history and request caps. A GIF document (`image/gif`) is handled the same way. Video messages are not sampled.
+
 ### Agent and tool-aware history
 
 Ask naturally for a drawing, page, poll, or reaction; a tool-capable model can choose the appropriate capability itself. `/svg`, `/html`, `/poll`, and `/topic` explicitly select the same capabilities and work even with autoreply disabled or a model that cannot call tools.
@@ -258,6 +264,11 @@ Bot settings come from environment variables, an optional `.env` file in the wor
 | `SECTOR_AI_IMAGE_HISTORY_LIMIT` | `4` | Earlier photos kept attached after a compaction; the newest photo message always stays whole. |
 | `SECTOR_AI_IMAGE_MAX_ATTACHED` | `32` | Cap on attached photos per request (`0` for none, which requires compaction). Exceeding it detaches older photos down to the history limit in one step. |
 | `SECTOR_AI_IMAGE_PATCH_PX` | `28` | Pixels per image token used by the local token estimate. |
+| `SECTOR_AI_GIF_MAX_FRAMES` | `8` | Frames sampled from a GIF (`0` keeps only the still thumbnail; max 32). |
+| `SECTOR_AI_GIF_FRAME_SIDE` | `480` | Longest side of a sampled GIF frame in pixels. |
+| `SECTOR_AI_GIF_MAX_BYTES` | `15728640` | Largest GIF clip downloaded for sampling; larger files use the thumbnail. |
+| `SECTOR_AI_GIF_TIMEOUT` | `20.0` | Seconds allowed for ffmpeg to sample one GIF. |
+| `SECTOR_AI_FFMPEG_PATH` | `ffmpeg` | ffmpeg executable or absolute path. Missing ffmpeg means still previews. |
 | `SECTOR_AI_ALBUM_WAIT` | `1.5` | Seconds to collect an album before answering it as one turn. |
 | `SECTOR_AI_DEBOUNCE_MAX_RESTARTS` | `3` | How many times a newer relevant message, or an edit, may restart a turn that has not replied yet (`0` disables debouncing). |
 | `SECTOR_AI_ADMIN_USERNAMES` | `ex0dus` | Comma separated usernames allowed to use admin commands. |

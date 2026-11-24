@@ -28,6 +28,7 @@ from .chat_metadata import (
     text_value,
     utc_now,
 )
+from .gifs import animation_record
 from .history import history_groups, history_text, plain_history, prompt_history_text, safe_cut
 from .images import (
     attach_images,
@@ -344,13 +345,16 @@ class SectorContext(CallbackContext):
     def make_user_message(self, message, *, include_command=False, album=None):
         """Build the transcript entry; ``album`` lists every message whose photo belongs to it.
 
-        Photos are recorded as metadata only. Ingestion replaces the records
-        with downloaded ones; other callers just need the markers.
+        Photos and GIFs are recorded as metadata only. Ingestion replaces the
+        records with downloaded ones; other callers just need the markers.
         """
         text = message.text or getattr(message, "caption", None) or ""
         if not isinstance(text, str):
             text = ""
         images = photo_records(album if album is not None else [message], self.settings.image_max_side)
+        animation = animation_record(message)
+        if animation is not None:
+            images.append(animation)
         if not text.strip() and not images:
             return None
         if text.startswith("/") and not include_command:
@@ -1395,10 +1399,10 @@ class SectorContext(CallbackContext):
         return True
 
     def _enforce_image_cap(self) -> None:
-        """Bound attached photos (and their memory) even when the bot stays silent.
+        """Bound attached images (and their memory) even when the bot stays silent.
 
         Detaching goes down to ``image_history_limit`` in one step, so the
-        cache-breaking change happens once rather than on every new photo.
+        cache-breaking change happens once rather than on every new image.
         """
         cap = self.settings.image_max_attached
         history = self.chat_message_history
@@ -1408,7 +1412,7 @@ class SectorContext(CallbackContext):
         if detached:
             self.chat_message_history = kept
             self.conversation_data.pop("token_count", None)
-            logger.info("More than %s photos attached; detached %s older ones", cap, detached)
+            logger.info("More than %s images attached; detached %s older ones", cap, detached)
 
     def _prompt_projection(self, messages: list) -> list:
         """Render history as the model receives it, with photos attached in native mode."""

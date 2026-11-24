@@ -39,6 +39,7 @@ from .chat_events import (
 from .coding import code_cmd, html_cmd, svg_cmd
 from .decision import decide_cmd
 from .emoji import emoji_cmd
+from .gifs import find_ffmpeg, handle_animation
 from .images import handle_photo, image_mode
 from .logging_utils import configure_logging, user_error_text
 from .mcp_tools import MCPRegistry
@@ -75,7 +76,10 @@ async def handle_message(update: Update, context: SectorContext) -> None:
 
 def _authored(message) -> bool:
     """A message someone wrote, not a service message such as a member join."""
-    return any(getattr(message, attribute, None) for attribute in ("text", "caption", "photo", "document", "sticker"))
+    return any(
+        getattr(message, attribute, None)
+        for attribute in ("text", "caption", "photo", "animation", "document", "sticker")
+    )
 
 
 # Error handler
@@ -206,6 +210,18 @@ def main(argv: list[str] | None = None) -> None:
     )
     if mode == "native" and settings.vision_model.strip():
         logger.warning("SECTOR_AI_VISION_MODEL is ignored while SECTOR_AI_DEFAULT_MODEL_VISION is true")
+    if mode == "off":
+        logger.info("GIFs: recorded as placeholders (no image-capable model configured)")
+    elif settings.gif_max_frames <= 0:
+        logger.info("GIFs: still previews only (SECTOR_AI_GIF_MAX_FRAMES=0)")
+    elif find_ffmpeg(settings) is None:
+        logger.warning("GIFs: still previews only; ffmpeg not found (set SECTOR_AI_FFMPEG_PATH to its path)")
+    else:
+        logger.info(
+            "GIFs: up to %s frames at %s px via ffmpeg",
+            settings.gif_max_frames,
+            settings.gif_frame_side,
+        )
 
     # Add command handlers
     # The first matching handler wins within this group. Edits must be captured
@@ -241,6 +257,8 @@ def main(argv: list[str] | None = None) -> None:
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message, block=False))
     # Photos join the same agent turn as text; albums become one turn.
     application.add_handler(MessageHandler(filters.PHOTO, handle_photo, block=False))
+    application.add_handler(MessageHandler(filters.ANIMATION, handle_animation, block=False))
+    application.add_handler(MessageHandler(filters.Document.MimeType("image/gif"), handle_animation, block=False))
     application.add_handler(MessageHandler(CHAT_EVENT_FILTER, handle_chat_event, block=False))
     application.add_handler(PollHandler(handle_poll_result, block=False))
     application.add_handler(PollAnswerHandler(handle_poll_answer, block=False))

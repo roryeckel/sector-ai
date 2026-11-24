@@ -282,6 +282,41 @@ prefix changes anyway. `SECTOR_AI_IMAGE_MAX_ATTACHED` is a safety cap for
 servers that limit images per request (vLLM's `--limit-mm-per-prompt`) and for
 memory; exceeding it detaches down to the history limit in one step.
 
+## GIFs
+
+Telegram sends a GIF as `message.animation`: a short H.264 MP4 without audio,
+plus a small JPEG thumbnail. A GIF can also arrive as an `image/gif` document.
+The model reads still images, not video, so the bot downloads the clip once and
+samples up to `SECTOR_AI_GIF_MAX_FRAMES` evenly spaced frames (8 by default) at
+most `SECTOR_AI_GIF_FRAME_SIDE` pixels on the long side (480 by default). The
+frames join the same `images` list as photos and are re-sent on later turns; a
+prefix-caching server then reuses them like any other image.
+
+One marker line describes the whole GIF, for example
+`[gif, 480x270, 2s, 8 frames: attached]`. The frames count individually toward
+the token estimate, `SECTOR_AI_IMAGE_HISTORY_LIMIT` and
+`SECTOR_AI_IMAGE_MAX_ATTACHED`, so a long animation cannot quietly consume the
+whole image budget. Compaction detaches the sampled frames as a unit and leaves
+a text marker.
+
+Sampling needs ffmpeg, either on `PATH` or at `SECTOR_AI_FFMPEG_PATH`. Without
+it, or when the clip exceeds `SECTOR_AI_GIF_MAX_BYTES`, cannot be downloaded, or
+takes longer than `SECTOR_AI_GIF_TIMEOUT` seconds to decode, the thumbnail is
+kept as a single still and the marker says `still preview only` with the reason.
+`SECTOR_AI_GIF_MAX_FRAMES=0` chooses still-only deliberately. A failed download
+with no thumbnail is marked `could not be loaded`. Captions, edits, reply
+targets and engagement decisions follow the photo rules: an uncaptioned GIF is
+judged as `[gif without a caption]`, and a replied GIF is marked `"gif":true`.
+
+Motion between the sampled frames is not observed. The marker says how many
+frames were sampled, and the static trust note tells the model that a GIF marker
+lists stills rather than a video.
+
+There is no native video path: the supported backends accept image content, not
+a `video_url` part. Sending more frames costs prompt tokens linearly and gives
+diminishing returns; four to eight frames already distinguish a short action,
+while twelve to sixteen mostly add tokens.
+
 ## Prompt caching and usage
 
 Prompt assembly is ordered for prefix reuse: static instructions first, then the

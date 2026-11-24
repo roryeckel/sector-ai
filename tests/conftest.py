@@ -178,6 +178,8 @@ class RecordingMessage:
         user_id=99,
         date=None,
         photos=None,
+        animation=None,
+        document=None,
         reply_to_message=None,
         fail_times=0,
     ):
@@ -185,6 +187,8 @@ class RecordingMessage:
         self.caption = caption
         self.date = date or datetime.now(UTC)
         self.photo = photos or []
+        self.animation = animation
+        self.document = document
         self.reply_to_message = reply_to_message
         self.from_user = SimpleNamespace(username=username, id=user_id)
         self.chat = SimpleNamespace(id=1)
@@ -279,6 +283,8 @@ def make_update(recording_message):
         *,
         caption=None,
         photos=None,
+        animation=None,
+        document=None,
         reply_to_message=None,
         date=None,
         callback_data=None,
@@ -291,6 +297,8 @@ def make_update(recording_message):
             caption=caption,
             username=username,
             photos=photos,
+            animation=animation,
+            document=document,
             reply_to_message=reply_to_message,
             date=date,
             fail_times=fail_times,
@@ -313,6 +321,71 @@ def make_update(recording_message):
                 edit_message_text=AsyncMock(),
             )
         return update
+
+    return _make
+
+
+@pytest.fixture
+def make_animation():
+    """A Telegram Animation/GIF document with a still thumbnail."""
+
+    def _make(
+        file_size=1024,
+        data=b"mp4-bytes",
+        width=480,
+        height=270,
+        duration=2,
+        file_unique_id="anim-1",
+        fail=False,
+        thumbnail=True,
+        thumbnail_data=b"thumb-bytes",
+        thumbnail_fail=False,
+        mime_type="video/mp4",
+    ):
+        downloads = []
+
+        async def get_file(read_timeout=None, connect_timeout=None):
+            async def download_as_bytearray():
+                downloads.append(file_unique_id)
+                if fail:
+                    raise RuntimeError("download broke")
+                return bytearray(data)
+
+            return SimpleNamespace(download_as_bytearray=download_as_bytearray)
+
+        thumb_downloads = []
+        thumbnail_object = None
+        if thumbnail:
+
+            async def get_thumbnail(read_timeout=None, connect_timeout=None):
+                async def download_as_bytearray():
+                    thumb_downloads.append("thumb-1")
+                    if thumbnail_fail:
+                        raise RuntimeError("thumbnail broke")
+                    return bytearray(thumbnail_data)
+
+                return SimpleNamespace(download_as_bytearray=download_as_bytearray)
+
+            thumbnail_object = SimpleNamespace(
+                file_size=len(thumbnail_data),
+                get_file=get_thumbnail,
+                width=320,
+                height=180,
+                file_unique_id="thumb-1",
+                downloads=thumb_downloads,
+            )
+
+        return SimpleNamespace(
+            file_size=file_size,
+            get_file=get_file,
+            width=width,
+            height=height,
+            duration=duration,
+            file_unique_id=file_unique_id,
+            mime_type=mime_type,
+            thumbnail=thumbnail_object,
+            downloads=downloads,
+        )
 
     return _make
 

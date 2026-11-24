@@ -103,6 +103,14 @@ class Settings(BaseSettings):
     image_max_attached: int = Field(default=32, ge=0, le=1000)
     # Pixels per image token for local estimates; 28 is conservative for Qwen-VL.
     image_patch_px: int = Field(default=28, ge=8, le=128)
+    # Telegram sends GIFs as short MP4s; they are sampled into still frames.
+    # 0 keeps only the still thumbnail, because the model cannot read video.
+    gif_max_frames: int = Field(default=8, ge=0, le=32)
+    gif_frame_side: int = Field(default=480, ge=90, le=2000)
+    gif_max_bytes: int = Field(default=15 * 1024 * 1024, ge=1024)
+    gif_timeout: float = Field(default=20.0, gt=0, le=120)
+    # System ffmpeg, or an absolute path. Missing ffmpeg falls back to stills.
+    ffmpeg_path: str = "ffmpeg"
     # Seconds to wait for the rest of an album before answering it as one turn.
     album_wait: float = Field(default=1.5, ge=0, le=30)
     # How many times a newer relevant message (or an edit) may restart a turn

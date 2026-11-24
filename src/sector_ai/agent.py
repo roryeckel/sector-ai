@@ -24,7 +24,8 @@ from .autoreply import should_respond
 from .capabilities import builtin_tools
 from .chat_metadata import is_message_edit, message_metadata, utc_now
 from .errors import UserFacingError
-from .images import load_photos
+from .gifs import load_animations
+from .images import image_mode, load_photos
 from .logging_utils import user_error_text
 from .mcp_tools import MCPRegistry
 from .prompts import AGENT_SYSTEM_PROMPT
@@ -76,6 +77,7 @@ async def run_agent(
     system_prompt=None,
     save_ai_message=True,
     photos=None,
+    animations=None,
     debounce=False,
     engage=None,
     edited=False,
@@ -84,9 +86,11 @@ async def run_agent(
 ) -> None:
     """Run one turn. ``photos`` lists the messages whose photos belong to it (an album).
 
-    ``debounce`` lets a newer relevant message cancel this turn while it has
-    not sent anything yet (see :mod:`sector_ai.debounce`). ``engage`` skips the
-    engagement decision. ``edited`` runs a turn for an edit that restarted one.
+    ``animations`` lists GIF messages; their sampled frames join the same
+    transcript as photos. ``debounce`` lets a newer relevant message cancel
+    this turn while it has not sent anything yet (see :mod:`sector_ai.debounce`).
+    ``engage`` skips the engagement decision. ``edited`` runs a turn for an
+    edit that restarted one.
     """
     if is_message_edit(update) and not edited:
         from .chat_events import handle_message_edit
@@ -119,6 +123,7 @@ async def run_agent(
             system_prompt=system_prompt,
             save_ai_message=save_ai_message,
             photos=photos,
+            animations=animations,
             engage=engage,
         )
     finally:
@@ -127,7 +132,7 @@ async def run_agent(
 
 
 async def _run_turn(
-    update, context, turn, *, command, prompt, force, ingest, system_prompt, save_ai_message, photos, engage
+    update, context, turn, *, command, prompt, force, ingest, system_prompt, save_ai_message, photos, animations, engage
 ) -> None:
     async with context.conversation_lock:
         await context.remove_pending_placeholder()
@@ -169,12 +174,25 @@ async def _run_turn(
                             )
                         )
                 include_command = bool(command) or bool(system_prompt)
-                if photos:
+                images = []
+                if photos or animations:
                     # A replaced photo is downloaded in its edited version.
                     early = turn.edits if turn is not None else {}
-                    images = await load_photos(
-                        [early.get(getattr(item, "message_id", None), item) for item in photos], context.settings
-                    )
+                    if photos:
+                        images.extend(
+                            await load_photos(
+                                [early.get(getattr(item, "message_id", None), item) for item in photos],
+                                context.settings,
+                            )
+                        )
+                    if animations:
+                        images.extend(
+                            await load_animations(
+                                [early.get(getattr(item, "message_id", None), item) for item in animations],
+                                context.settings,
+                                image_mode(context.settings),
+                            )
+                        )
                 # Read after the last await: an edit that arrived before this
                 # point is stored instead of the original.
                 edits = turn.edits if turn is not None else {}
@@ -186,6 +204,8 @@ async def _run_turn(
                 if photos:
                     album = [edits.get(getattr(item, "message_id", None), item) for item in photos]
                     context.save_user_message(message, include_command=include_command, album=album, images=images)
+                elif animations:
+                    context.save_user_message(message, include_command=include_command, images=images)
                 else:
                     context.save_user_message(message, include_command=include_command)
             debounce_turns.mark_stored(turn)
