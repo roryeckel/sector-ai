@@ -191,3 +191,15 @@ async def test_characterize_rejects_an_echoed_placeholder(admin_context, make_up
 
     assert context.chat_system_prompt == "original prompt"
     assert "placeholder" in update.message.last_text()
+
+
+async def test_characterize_does_not_copy_the_chat_snapshot_into_the_prompt(admin_context, make_update):
+    context = admin_context("You are a pirate.")
+    update = make_update(text="/characterize a pirate")
+
+    await characterize_cmd(update, context)
+
+    sent = "\n".join(message.content for message in context.bot_llm.received[0])
+    assert "Current Telegram snapshot" not in sent
+    assert "[telegram " not in sent
+    assert context.chat_system_prompt == "You are a pirate."

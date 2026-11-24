@@ -4,7 +4,7 @@ from langchain_core.prompts import PromptTemplate
 from telegram import Update
 
 from .admin import admin_only
-from .chat_metadata import instruction_messages, strip_internal_envelope, with_context
+from .chat_metadata import instruction_messages, strip_internal_envelope
 from .history import scoped_control
 from .message_text import message_refused, message_text
 from .sector_context import SectorContext
@@ -28,14 +28,14 @@ async def characterize_cmd(update: Update, context: SectorContext) -> None:
         return
     characterization_prompt = characterization_prompt[-1]
     logger.info(f"Characterization Prompt: {characterization_prompt}")
-    messages = with_context(
-        instruction_messages(
-            template,
-            {"input": characterization_prompt, **system_template_dict},
-            input_key="input",
-            input_text=characterization_prompt,
-        ),
-        context,
+    # No chat context here. The task is "write a system prompt", and a model
+    # shown the internal trust note and the chat snapshot copies them into the
+    # prompt it writes.
+    messages = instruction_messages(
+        template,
+        {"input": characterization_prompt, **system_template_dict},
+        input_key="input",
+        input_text=characterization_prompt,
     )
     async with typing(update.message):
         message = await context.bind_cache(context.bot_llm, "characterize").ainvoke(messages)
