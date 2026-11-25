@@ -31,6 +31,7 @@ def test_defaults_match_the_shipped_configuration(make_settings):
     assert settings.album_wait == 1.5
     assert settings.default_svg_size == 250
     assert settings.admin_usernames == ["ex0dus"]
+    assert settings.admin_user_ids == []
     assert settings.streaming_cursor == "🦙"
     assert settings.streaming_interval_sec == 0.7
     assert settings.streaming_chunk_size == 150
@@ -134,6 +135,42 @@ def test_admin_usernames_accepts_an_init_list(make_settings):
 
 def test_admin_usernames_rejects_broken_json(monkeypatch):
     monkeypatch.setenv("SECTOR_AI_ADMIN_USERNAMES", '["alice"')
+
+    with pytest.raises(ValidationError):
+        env_only()
+
+
+def test_admin_user_ids_accepts_comma_separated(monkeypatch):
+    monkeypatch.setenv("SECTOR_AI_ADMIN_USER_IDS", "111, 222 ,333")
+
+    assert env_only().admin_user_ids == [111, 222, 333]
+
+
+def test_admin_user_ids_accepts_json_list(monkeypatch):
+    monkeypatch.setenv("SECTOR_AI_ADMIN_USER_IDS", "[111, 222]")
+
+    assert env_only().admin_user_ids == [111, 222]
+
+
+def test_admin_user_ids_accepts_empty_string(monkeypatch):
+    monkeypatch.setenv("SECTOR_AI_ADMIN_USER_IDS", "")
+
+    assert env_only().admin_user_ids == []
+
+
+def test_admin_user_ids_accepts_an_init_list(make_settings):
+    assert make_settings(admin_user_ids=[111]).admin_user_ids == [111]
+
+
+def test_admin_user_ids_rejects_non_numeric(monkeypatch):
+    monkeypatch.setenv("SECTOR_AI_ADMIN_USER_IDS", "111,manoli")
+
+    with pytest.raises(ValidationError):
+        env_only()
+
+
+def test_admin_user_ids_rejects_negative(monkeypatch):
+    monkeypatch.setenv("SECTOR_AI_ADMIN_USER_IDS", "-5")
 
     with pytest.raises(ValidationError):
         env_only()

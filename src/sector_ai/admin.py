@@ -7,23 +7,37 @@ from telegram.error import BadRequest
 
 from .history import scoped_control
 from .sector_context import SectorContext
+from .settings import Settings
 from .typing_indicator import typing
 
 logger = logging.getLogger(__name__)
 
 
+def is_admin(update: Update, settings: Settings) -> bool:
+    """Whether the sender is on either admin allowlist.
+
+    Telegram usernames are optional and can change; numeric IDs are stable, so
+    an admin whose account has no username can still be configured.
+    """
+    user = getattr(update, "effective_user", None)
+    if user is None:
+        return False
+    username = getattr(user, "username", None)
+    if isinstance(username, str) and username in settings.admin_usernames:
+        return True
+    user_id = getattr(user, "id", None)
+    return isinstance(user_id, int) and user_id in settings.admin_user_ids
+
+
 def admin_only(func):
     @wraps(func)
     async def wrapper(update: Update, context: SectorContext, *args, **kwargs):
-        if context is None or (
-            update.effective_user and update.effective_user.username in context.settings.admin_usernames
-        ):
+        if context is None or is_admin(update, context.settings):
             return await func(update, context, *args, **kwargs)
 
         user = getattr(update, "effective_user", None)
-        logger.warning(
-            "Unauthorized access attempt by user: %s in update %s", getattr(user, "username", None) or "unknown", update
-        )
+        identifier = getattr(user, "username", None) or getattr(user, "id", None) or "unknown"
+        logger.warning("Unauthorized access attempt by user: %s in update %s", identifier, update)
         text = "You are not authorized to use this command."
         if update.message is not None:
             await update.message.reply_text(text)

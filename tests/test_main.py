@@ -326,6 +326,7 @@ def test_main_cli_overrides_environment(tmp_path, monkeypatch):
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:abc")
     monkeypatch.setenv("SECTOR_AI_DEFAULT_MODEL", "env-model")
     monkeypatch.setenv("SECTOR_AI_ADMIN_USERNAMES", "envadmin,someone")
+    monkeypatch.setenv("SECTOR_AI_ADMIN_USER_IDS", "111,222")
     monkeypatch.setenv("SECTOR_AI_LLM_PROVIDER", "ollama")
     monkeypatch.setenv("SECTOR_AI_OPENAI_BASE_URL", "http://env:1234/v1")
 
@@ -337,6 +338,10 @@ def test_main_cli_overrides_environment(tmp_path, monkeypatch):
             "cliadmin",
             "--admin",
             "other",
+            "--admin-id",
+            "333",
+            "--admin-id",
+            "444",
             "--log-level",
             "debug",
             "--provider",
@@ -349,6 +354,7 @@ def test_main_cli_overrides_environment(tmp_path, monkeypatch):
     settings = application.bot_data["settings"]
     assert settings.default_model == "cli-model"
     assert settings.admin_usernames == ["cliadmin", "other"]
+    assert settings.admin_user_ids == [333, 444]
     assert settings.log_level == "DEBUG"
     assert settings.llm_provider == "openai"
     assert settings.openai_base_url == "http://lmstudio:1234/v1"

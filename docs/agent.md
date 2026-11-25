@@ -160,6 +160,10 @@ conversation; it is not a separate persistent memory store. Old updates cannot
 roll back newer permission observations. These observations do not grant
 administrative command privileges or expand MCP tool allowlists.
 
+Admin commands are matched against `SECTOR_AI_ADMIN_USERNAMES` and the stable
+numeric `SECTOR_AI_ADMIN_USER_IDS`, so an account without a username can be an
+administrator.
+
 All these events are context-only. Polling explicitly subscribes to message
 edits, poll votes, closed-poll updates and bot membership changes, without
 subscribing to reaction updates or other users' detailed membership changes.
