@@ -119,6 +119,9 @@ class Settings(BaseSettings):
     default_svg_size: int = Field(default=250, ge=16, le=2048)
 
     admin_usernames: Annotated[list[str], NoDecode] = ["ex0dus"]
+    # Telegram user IDs, for admins whose account has no username and to keep
+    # access when a username changes. Both allowlists are checked.
+    admin_user_ids: Annotated[list[int], NoDecode] = []
 
     streaming_cursor: str = "🦙"
     streaming_interval_sec: float = Field(default=0.7, ge=0)
@@ -188,6 +191,25 @@ class Settings(BaseSettings):
     @classmethod
     def _list_fields(cls, value: object) -> object:
         return _split_list(value)
+
+    @field_validator("admin_user_ids", mode="before")
+    @classmethod
+    def _user_id_fields(cls, value: object) -> object:
+        items = _split_list(value)
+        if not isinstance(items, (list, tuple)):
+            return items
+        identifiers = []
+        for item in items:
+            if isinstance(item, bool) or not isinstance(item, (int, str)):
+                raise ValueError(f"must be a Telegram user ID, got {item!r}")
+            try:
+                identifier = int(str(item).strip())
+            except ValueError:
+                raise ValueError(f"must be a Telegram user ID, got {item!r}") from None
+            if identifier <= 0:
+                raise ValueError(f"must be a positive Telegram user ID, got {identifier}")
+            identifiers.append(identifier)
+        return identifiers
 
     @field_validator("llm_provider")
     @classmethod

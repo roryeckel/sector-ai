@@ -1,5 +1,6 @@
 """Tests for admin security boundary and admin commands."""
 
+import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -35,6 +36,43 @@ async def test_blocks_non_admin(mock_update, mock_context):
     await wrapped(update, mock_context)
     inner.assert_not_awaited()
     update.message.reply_text.assert_awaited_once_with("You are not authorized to use this command.")
+
+
+async def test_allows_admin_by_user_id(mock_update, mock_context):
+    inner = AsyncMock()
+    wrapped = admin_only(inner)
+    update = mock_update(text="/test", username=None)
+    update.effective_user.id = 7395012963
+    mock_context.settings.admin_user_ids = [7395012963]
+
+    await wrapped(update, mock_context)
+
+    inner.assert_awaited_once()
+
+
+async def test_blocks_a_user_id_that_is_not_listed(mock_update, mock_context):
+    inner = AsyncMock()
+    wrapped = admin_only(inner)
+    update = mock_update(text="/test", username=None)
+    update.effective_user.id = 42
+    mock_context.settings.admin_user_ids = [43]
+
+    await wrapped(update, mock_context)
+
+    inner.assert_not_awaited()
+    update.message.reply_text.assert_awaited_once_with("You are not authorized to use this command.")
+
+
+async def test_unauthorized_log_names_the_numeric_id(mock_update, mock_context, caplog):
+    inner = AsyncMock()
+    wrapped = admin_only(inner)
+    update = mock_update(text="/test", username=None)
+    update.effective_user.id = 7395012963
+
+    with caplog.at_level(logging.WARNING):
+        await wrapped(update, mock_context)
+
+    assert "7395012963" in caplog.text
 
 
 async def test_context_none_passthrough(mock_update):

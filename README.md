@@ -271,7 +271,8 @@ Bot settings come from environment variables, an optional `.env` file in the wor
 | `SECTOR_AI_FFMPEG_PATH` | `ffmpeg` | ffmpeg executable or absolute path. Missing ffmpeg means still previews. |
 | `SECTOR_AI_ALBUM_WAIT` | `1.5` | Seconds to collect an album before answering it as one turn. |
 | `SECTOR_AI_DEBOUNCE_MAX_RESTARTS` | `3` | How many times a newer relevant message, or an edit, may restart a turn that has not replied yet (`0` disables debouncing). |
-| `SECTOR_AI_ADMIN_USERNAMES` | `ex0dus` | Comma separated usernames allowed to use admin commands. |
+| `SECTOR_AI_ADMIN_USERNAMES` | `ex0dus` | Comma separated usernames (without `@`) allowed to use admin commands. |
+| `SECTOR_AI_ADMIN_USER_IDS` | *empty* | Comma separated Telegram user IDs allowed to use admin commands, checked alongside the usernames. Use this for an admin whose account has no username. |
 | `SECTOR_AI_DEFAULT_SVG_SIZE` | `250` | Base size for `/svg`; the rendered PNG is twice this. |
 | `SECTOR_AI_STREAMING_CURSOR` | `🦙` | Cursor shown while a reply streams. |
 | `SECTOR_AI_STREAMING_INTERVAL_SEC` | `0.7` | Minimum seconds between Telegram edits. |

@@ -132,7 +132,15 @@ def build_parser() -> argparse.ArgumentParser:
         dest="admin_usernames",
         action="append",
         metavar="USERNAME",
-        help="Admin username, repeatable; replaces SECTOR_AI_ADMIN_USERNAMES when given",
+        help="Admin username without @, repeatable; replaces SECTOR_AI_ADMIN_USERNAMES when given",
+    )
+    parser.add_argument(
+        "--admin-id",
+        dest="admin_user_ids",
+        action="append",
+        type=int,
+        metavar="ID",
+        help="Admin Telegram user ID, repeatable; replaces SECTOR_AI_ADMIN_USER_IDS when given",
     )
     parser.add_argument(
         "--log-level", dest="log_level", type=str.upper, choices=LOG_LEVELS, help="Logging level (SECTOR_AI_LOG_LEVEL)"
