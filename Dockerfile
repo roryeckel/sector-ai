@@ -9,6 +9,12 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
+# GIFs are decoded into still frames; without ffmpeg the bot keeps the still
+# thumbnail and its markers say motion was not sampled.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
 # pyproject.toml, README.md and LICENSE are the packaging inputs; src holds the
 # code. Copying them before installing keeps the dependency layer cacheable via
 # the BuildKit mount below.

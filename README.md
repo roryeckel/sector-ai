@@ -5,16 +5,16 @@
 [![Docker](https://img.shields.io/github/v/release/roryeckel/sector-ai?label=ghcr.io&logo=docker&logoColor=white&color=2496ED)](https://github.com/roryeckel/sector-ai/pkgs/container/sector-ai)
 [![License](https://img.shields.io/github/license/roryeckel/sector-ai.svg)](https://github.com/roryeckel/sector-ai/blob/master/LICENSE)
 
-Sector AI is a Telegram bot that brings a chat model into your conversations. The secret sauce is LangChain. It supports autoreply decision-making, structured output parsing for polls, multimodal image processing, emoji responses, code generation, and more.
+Sector AI is a Telegram bot that brings a chat model into your conversations. LangGraph orchestrates a single bounded agent over LangChain models. It can choose SVG, HTML, poll, reaction, and explicitly configured MCP tools, while keeping the existing slash commands.
 
 ## Backends
 
-The bot runs on either of two backends. Both are first-class: streaming replies, vision, autoreply decisions, model switching and token counting all work the same.
+The bot runs on either of two backends. Both are first-class: streaming replies, photos, autoreply decisions, model switching and token counting all work the same.
 
 - **Ollama** (default) — Ollama's native API.
 - **OpenAI-compatible** — Chat Completions against any `/v1` endpoint: LM Studio, vLLM, llama.cpp, OpenRouter, OpenAI itself, or your own inference server.
 
-No models are bundled. Point the bot at a server you already run and set `SECTOR_AI_DEFAULT_MODEL` (and `SECTOR_AI_VISION_MODEL` for photos) to a model it serves. Vision commands need a multimodal model; the rest works with any text model that can follow structured output.
+No models are bundled. Point the bot at a server you already run and set `SECTOR_AI_DEFAULT_MODEL` to a model it serves. With a multimodal default model, photos are part of the conversation itself. With a text-only one, set `SECTOR_AI_DEFAULT_MODEL_VISION=false` and optionally `SECTOR_AI_VISION_MODEL` to have photos described; see [Photos](#photos).
 
 ### Ollama
 
@@ -36,7 +36,7 @@ SECTOR_AI_OPENAI_BASE_URL=https://your-server.example/v1
 SECTOR_AI_OPENAI_API_KEY=...
 ```
 
-The URL must include `/v1`. Leave the key empty for a server that does not check one; the bot sends `dummy`. Use the server's own model names in `SECTOR_AI_DEFAULT_MODEL` and `SECTOR_AI_VISION_MODEL`, for example `vendor/model` on OpenRouter.
+The URL must include `/v1`. Leave the key empty for a server that does not check one; the bot sends `dummy`. Use the server's own model names in `SECTOR_AI_DEFAULT_MODEL` (and `SECTOR_AI_VISION_MODEL`, if used), for example `vendor/model` on OpenRouter.
 
 | Server | `SECTOR_AI_OPENAI_BASE_URL` |
 | --- | --- |
@@ -73,6 +73,38 @@ Replies longer than Telegram's 4096-character limit are split across messages at
 
 ## Features
 
+### Photos
+
+Photos are ordinary messages in the conversation. They go through the same autoreply decision and agent turn as text, so a caption can ask for an SVG, a poll or a reaction, and later messages can refer back to the photo.
+
+- **Native** (default): the photo is attached to its message and the default model sees the pixels on that turn and later ones. The bot uses the largest Telegram rendition up to `SECTOR_AI_IMAGE_MAX_SIDE`, downloads it once, and re-sends identical bytes, so a prefix-caching server can reuse the cached prompt.
+- **Describe**: with `SECTOR_AI_DEFAULT_MODEL_VISION=false` and `SECTOR_AI_VISION_MODEL` set, the vision model describes each photo the first time a reply needs it. The description replaces the photo in the user's message, labelled as coming from that model.
+- **Off**: with neither, the conversation records `[photo …: image input is unavailable for this model]` so the model knows a photo was sent.
+
+An album is collected until no new photo has arrived for `SECTOR_AI_ALBUM_WAIT` seconds, capped at 10 seconds after its first photo (or the configured wait, if longer), and answered as one turn. Photos count toward the context window by size (about one token per `SECTOR_AI_IMAGE_PATCH_PX`² pixels), so compaction triggers on time. Compaction keeps `SECTOR_AI_IMAGE_HISTORY_LIMIT` earlier photos attached and turns older ones into text markers; the model's earlier replies about them remain. `SECTOR_AI_IMAGE_MAX_ATTACHED` caps attached photos per request, for servers that limit images per prompt. Tools that call a model themselves, such as `generate_svg`, see the photo marker and the conversation, not the pixels.
+
+### GIFs
+
+Telegram delivers a GIF as a short MP4 (plus a still thumbnail); the model reads images, not video. The bot samples up to `SECTOR_AI_GIF_MAX_FRAMES` frames (8) at `SECTOR_AI_GIF_FRAME_SIDE` pixels (480) with ffmpeg and attaches them exactly like photos, so later turns and follow-ups can refer to the motion. One marker describes the whole GIF, e.g. `[gif, 480x270, 2s, 8 frames: attached]`.
+
+Sampling requires ffmpeg (`SECTOR_AI_FFMPEG_PATH`, or `ffmpeg` on `PATH`). Without it, or for a file over `SECTOR_AI_GIF_MAX_BYTES`, a failed download or a decode timeout, the thumbnail is kept as one still and the marker says `still preview only`; `SECTOR_AI_GIF_MAX_FRAMES=0` selects still-only deliberately. Frames count individually toward the image history and request caps. A GIF document (`image/gif`) is handled the same way. Video messages are not sampled.
+
+### Agent and tool-aware history
+
+Ask naturally for a drawing, page, poll, or reaction; a tool-capable model can choose the appropriate capability itself. `/svg`, `/html`, `/poll`, and `/topic` explicitly select the same capabilities and work even with autoreply disabled or a model that cannot call tools.
+
+Generated content and reaction receipts enter the conversation history: exact poll questions/options, SVG source, HTML source, reaction emoji and target, and delivery outcomes. Follow-up messages can refer to those outputs, including outputs requested through commands. Other content commands also record their requests and replies. History is isolated by chat and forum topic, compacted as it fills, and kept in process memory only. Long replies, including continuation chunks, stay in the originating forum topic.
+
+The model also receives current UTC time, observed chat/topic labels, message timestamps and sender identities, and explicit reply targets with short excerpts. Assistant messages are shown without their own internal `[telegram ...]` envelope, and any leading envelope is stripped before delivery, including during streaming. Joins/leaves, pins, chat-title changes, and forum-topic changes enter history as observed events without triggering replies on their own. The tool-free autoreply decision uses bounded recent history and the existing summary instead of judging only the latest text. It budgets the raw incoming text/caption before optional metadata, so an oversized sender label or reply excerpt cannot hide the actual question.
+
+Message edits update retained text and record a correction without rerunning commands or tools. Final totals for bot-created polls return to the chat/topic where the poll was posted. The bot can set one standard reaction on the current or a past message; it does not observe reactions made by users. Bot membership and permission changes are shared chat-wide context, never authorization to use additional tools. These events stay silent until a later conversation turn uses them.
+
+Tool calls, iterations, execution time, and output size are bounded. An uncertain side effect stops further tool execution for that turn; Telegram polls and artifacts are not blindly resent. Reactions are retried once on a network failure because re-setting one is idempotent. If a run is interrupted, delivery uncertainty is attached only to the tool call that was executing, and unstarted calls are marked not executed. Set `SECTOR_AI_AGENT_TOOLS_ENABLED=false` to retain plain chat and explicit commands.
+
+Prompt assembly keeps static instructions and retained history before the changing UTC/chat snapshot, so a new message does not invalidate the reusable prefix. Recognized OpenAI and OpenRouter endpoints receive request-local cache affinity; self-hosted compatible servers keep their own prefix cache and are never sent vendor-only fields. `/usage` reports token and cache counters by workload. See [prompt caching](docs/agent.md#prompt-caching-and-usage).
+
+MCP is opt-in through a separate JSON file, with explicit tool allowlists and optional chat restrictions. See [agent configuration and behavior](docs/agent.md) and [`mcp.example.json`](mcp.example.json).
+
 This project uses the `python-telegram-bot` library, with various command handlers and message handlers to manage different interactions. Below is a summary of each command:
 
 ### Introduction (`/start`)
@@ -88,8 +120,8 @@ This project uses the `python-telegram-bot` library, with various command handle
 - **Usage**: `/summarize`
 
 ### Generate Emojis Based on Prompt (`/emoji`)
-- **Description**: Creates emojis based on user input or specific prompts related to emotions or themes relevant to the chat.
-- **Usage**: `/emoji [prompt]` (where `[prompt]` is a description of what kind of emoji you want)
+- **Description**: Creates emojis based on user input, or from the recent conversation when no prompt is given. Recent history is bounded to the context window, oldest messages dropped first.
+- **Usage**: `/emoji [prompt]` (where `[prompt]` is a description of what kind of emoji you want; leave it out to summarize the current conversation)
 
 ### Generate a Poll Based on Question or Prompt (`/poll`)
 - **Description**: Creates a poll with multiple options based on user input, useful for gathering feedback.
@@ -110,6 +142,7 @@ This project uses the `python-telegram-bot` library, with various command handle
 ### Generate Fake Website Based on Specification (`/html`)
 - **Description**: Renders a mock HTML website based on given specifications or details from the user.
 - **Usage**: `/html [specification]` (where `[specification]` includes layout and content requirements)
+- **Note**: The page is sent as `Website.html` without restrictions, so it may contain scripts or forms requested by any chat member. Open it like any other attachment from the chat.
 
 ### Generate Horrible SVG Image Based on Description (`/svg`)
 - **Description**: Creates an SVG graphic according to detailed descriptions provided by users, often with humorous or nonsensical results.
@@ -119,12 +152,16 @@ This project uses the `python-telegram-bot` library, with various command handle
 - **Description**: Counts the system prompt and current chat history with the model server's tokenizer when available, so messages that have not been processed yet are included. On an OpenAI-compatible server it first uses OpenAI's free `/responses/input_tokens` endpoint, which counts the Responses API input and can differ slightly from a Chat Completions request. If that endpoint is missing, it falls back to a one-token probe for the exact chat count; on a paid endpoint that probe sends the whole prompt as a normal request. The result is cached until the context or model changes. If the server reports no count, the reply is marked as an estimate. When the server also reports its context window, the reply shows the count as a percentage of it. Ollama can truncate a prompt that exceeds the server's context window, so the reported number is then a lower bound.
 - **Usage**: `/tokens`
 
+### Inspect Model Usage (`/usage`) (Admin Only)
+- **Description**: Shows the model, provider host, and per-workload request, input, output, cache-read, cache-write and cache-hit counters since the process started. Counters come from the model server's usage report; streaming counters require `SECTOR_AI_STREAM_USAGE=true` on servers that support `stream_options`. Prompt text, tool arguments and credentials are never included.
+- **Usage**: `/usage`
+
 ### Compact the Context (`/compact`) (Admin Only)
 - **Description**: Folds the older messages into the running summary immediately, keeps the most recent messages verbatim, and reports the token count before and after. Normally runs on its own before a reply; this command is for testing or for shrinking the context on demand.
 - **Usage**: `/compact`
 
 ### Toggle Automatic Replies (`/autoreply`)
-- **Description**: Enables or disables automatic replies triggered by the LLM decision. When enabled, the bot will automatically respond to user messages and images.
+- **Description**: Enables or disables automatic replies triggered by the LLM decision. When enabled, the bot decides whether to respond to each message, photos included.
 - **Usage**: `/autoreply` to toggle the feature
 
 ### Reset Chat Context (`/clear`)
@@ -211,7 +248,7 @@ Image tags:
 
 ## Configuration
 
-There is no configuration file. Settings come from environment variables, an optional `.env` file in the working directory, or the command line (which wins over both).
+Bot settings come from environment variables, an optional `.env` file in the working directory, or the command line (which wins over both). MCP server definitions optionally live in a separate JSON file selected by `SECTOR_AI_MCP_CONFIG`; the old general-purpose `config.json` is not used.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
@@ -221,7 +258,19 @@ There is no configuration file. Settings come from environment variables, an opt
 | `SECTOR_AI_OPENAI_BASE_URL` | `http://localhost:11434/v1` | Base URL for the `openai` provider; must include `/v1`. |
 | `SECTOR_AI_OPENAI_API_KEY` | *empty* | Key for the `openai` provider. Empty sends `dummy`, which local servers ignore. |
 | `SECTOR_AI_DEFAULT_MODEL` | `llama3.2-vision:11b-instruct-fp16` | Chat model at start-up. Set it to a model the backend serves. |
-| `SECTOR_AI_VISION_MODEL` | `llama3.2-vision:11b-instruct-fp16` | Model used for photos; must accept images. |
+| `SECTOR_AI_DEFAULT_MODEL_VISION` | `true` | The default model reads images, so photos are sent inline. Set `false` for a text-only model. |
+| `SECTOR_AI_VISION_MODEL` | *empty* | Only when `SECTOR_AI_DEFAULT_MODEL_VISION=false`: model that describes photos. Empty records a placeholder instead. |
+| `SECTOR_AI_IMAGE_MAX_SIDE` | `1280` | Largest Telegram photo rendition to use, by longest side in pixels. |
+| `SECTOR_AI_IMAGE_HISTORY_LIMIT` | `4` | Earlier photos kept attached after a compaction; the newest photo message always stays whole. |
+| `SECTOR_AI_IMAGE_MAX_ATTACHED` | `32` | Cap on attached photos per request (`0` for none, which requires compaction). Exceeding it detaches older photos down to the history limit in one step. |
+| `SECTOR_AI_IMAGE_PATCH_PX` | `28` | Pixels per image token used by the local token estimate. |
+| `SECTOR_AI_GIF_MAX_FRAMES` | `8` | Frames sampled from a GIF (`0` keeps only the still thumbnail; max 32). |
+| `SECTOR_AI_GIF_FRAME_SIDE` | `480` | Longest side of a sampled GIF frame in pixels. |
+| `SECTOR_AI_GIF_MAX_BYTES` | `15728640` | Largest GIF clip downloaded for sampling; larger files use the thumbnail. |
+| `SECTOR_AI_GIF_TIMEOUT` | `20.0` | Seconds allowed for ffmpeg to sample one GIF. |
+| `SECTOR_AI_FFMPEG_PATH` | `ffmpeg` | ffmpeg executable or absolute path. Missing ffmpeg means still previews. |
+| `SECTOR_AI_ALBUM_WAIT` | `1.5` | Seconds to collect an album before answering it as one turn. |
+| `SECTOR_AI_DEBOUNCE_MAX_RESTARTS` | `3` | How many times a newer relevant message, or an edit, may restart a turn that has not replied yet (`0` disables debouncing). |
 | `SECTOR_AI_ADMIN_USERNAMES` | `ex0dus` | Comma separated usernames allowed to use admin commands. |
 | `SECTOR_AI_DEFAULT_SVG_SIZE` | `250` | Base size for `/svg`; the rendered PNG is twice this. |
 | `SECTOR_AI_STREAMING_CURSOR` | `🦙` | Cursor shown while a reply streams. |
@@ -231,6 +280,20 @@ There is no configuration file. Settings come from environment variables, an opt
 | `SECTOR_AI_LLM_TIMEOUT` | `200.0` | Request timeout in seconds. `SECTOR_AI_OLLAMA_TIMEOUT` is also accepted. |
 | `SECTOR_AI_LLM_DISALLOWED_MODELS` | *empty* | Comma separated models hidden from `/models`. `SECTOR_AI_OLLAMA_DISALLOWED_MODELS` is also accepted. |
 | `SECTOR_AI_LLM_HEADERS` | `{}` | JSON object of extra HTTP headers. `SECTOR_AI_OLLAMA_HEADERS` is also accepted. |
+| `SECTOR_AI_PROMPT_CACHE_MODE` | `auto` | `auto` applies cache affinity only to recognized OpenAI/OpenRouter hosts. `off` disables it; `openai` and `openrouter` force a choice for an OpenAI-compatible provider. |
+| `SECTOR_AI_PROMPT_CACHE_KEY_PREFIX` | `sector-ai` | Stable prefix for request-local cache/session keys. Chat and forum topic IDs are appended. |
+| `SECTOR_AI_PROMPT_CACHE_RETENTION` | *empty* | OpenAI only, models before GPT-5.6: `in_memory` or `24h`. If a TTL is also set, the TTL wins and a startup warning says so. |
+| `SECTOR_AI_PROMPT_CACHE_TTL` | *empty* | OpenAI (GPT-5.6+): `30m` for `prompt_cache_options`. OpenRouter: `1h` for Anthropic-style automatic caching. |
+| `SECTOR_AI_STREAM_USAGE` | `false` | Ask OpenAI-compatible servers to include usage in stream chunks. Leave off for older local servers that reject `stream_options`. |
+| `SECTOR_AI_AGENT_TOOLS_ENABLED` | `true` | Let a tool-capable chat model select tools autonomously. Explicit commands remain available when false. |
+| `SECTOR_AI_AUTOREPLY_HISTORY_MESSAGES` | `8` | Maximum recent history messages supplied to the tool-free engagement decision. |
+| `SECTOR_AI_AUTOREPLY_CONTEXT_TOKENS` | `1536` | Conservative token budget for the entire engagement prompt, further limited by the model window. |
+| `SECTOR_AI_AGENT_MAX_TOOL_CALLS` | `6` | Maximum tool executions per turn. |
+| `SECTOR_AI_AGENT_MAX_ITERATIONS` | `8` | Maximum autonomous model iterations per turn. |
+| `SECTOR_AI_AGENT_TIMEOUT` | `240` | Overall agent turn timeout in seconds, excluding time waiting for the conversation lock. |
+| `SECTOR_AI_TOOL_TIMEOUT` | `90` | Built-in capability timeout in seconds. |
+| `SECTOR_AI_TOOL_RESULT_MAX_CHARS` | `16000` | Maximum history result size. Oversized external results are explicitly marked truncated; generated source is limited to half this size. |
+| `SECTOR_AI_MCP_CONFIG` | *empty* | Optional MCP-only JSON configuration file. |
 | `SECTOR_AI_CONTEXT_LENGTH` | `0` | Context window in tokens. `0` detects it from the server and falls back to 8192. |
 | `SECTOR_AI_COMPACTION_ENABLED` | `true` | Fold old messages into a summary instead of dropping them. |
 | `SECTOR_AI_COMPACTION_THRESHOLD` | `0.75` | Share of the context window that triggers a compaction. |

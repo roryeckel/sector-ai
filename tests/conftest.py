@@ -15,6 +15,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, PropertyMock
 
+import httpx
 import pytest
 from langchain_core.language_models import GenericFakeChatModel
 from langchain_core.messages import AIMessage
@@ -24,6 +25,27 @@ from sector_ai.sector_context import SectorContext
 from sector_ai.settings import Settings
 
 TEST_TOKEN = "123:test-token"
+
+
+@pytest.fixture(autouse=True)
+def _no_network(monkeypatch):
+    """Refuse real HTTP connections instantly.
+
+    Context-length and model lookups otherwise dial the default local server,
+    and a refused connection still costs seconds on some platforms. Raising
+    ``ConnectError`` is exactly what a refusal looks like to the code under
+    test. Tests that need responses use ``httpx.MockTransport``, which this
+    does not touch.
+    """
+
+    def refuse(self, request):
+        raise httpx.ConnectError("network disabled in tests", request=request)
+
+    async def refuse_async(self, request):
+        refuse(self, request)
+
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", refuse)
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", refuse_async)
 
 
 @pytest.fixture
@@ -75,12 +97,14 @@ def mock_context(sample_settings):
 def mock_update():
     def _factory(text="/cmd", username="testuser"):
         update = MagicMock()
+        update.effective_message = update.message
         update.message.text = text
         update.effective_message.text = text
         update.message.from_user.username = username
         update.effective_user.username = username
         update.message.reply_text = AsyncMock()
         update.message.reply_poll = AsyncMock()
+        update.message.reply_chat_action = AsyncMock(return_value=True)
         return update
 
     return _factory
@@ -154,6 +178,8 @@ class RecordingMessage:
         user_id=99,
         date=None,
         photos=None,
+        animation=None,
+        document=None,
         reply_to_message=None,
         fail_times=0,
     ):
@@ -161,6 +187,8 @@ class RecordingMessage:
         self.caption = caption
         self.date = date or datetime.now(UTC)
         self.photo = photos or []
+        self.animation = animation
+        self.document = document
         self.reply_to_message = reply_to_message
         self.from_user = SimpleNamespace(username=username, id=user_id)
         self.chat = SimpleNamespace(id=1)
@@ -173,6 +201,20 @@ class RecordingMessage:
         if self._fail_times:
             self._fail_times -= 1
             raise BadRequest(f"{name} failed")
+
+    _is_topic_message = None
+
+    @property
+    def is_topic_message(self):
+        """A thread ID means a forum topic unless a test sets this explicitly
+        (``False`` models a reply chain in an ordinary supergroup)."""
+        if self._is_topic_message is not None:
+            return self._is_topic_message
+        return getattr(self, "message_thread_id", None) is not None
+
+    @is_topic_message.setter
+    def is_topic_message(self, value):
+        self._is_topic_message = value
 
     async def reply_text(self, text, **kwargs):
         self._record("reply_text", (text,), kwargs)
@@ -198,10 +240,25 @@ class RecordingMessage:
         self._record("edit_text", (text,), kwargs)
         return self
 
+    async def delete(self):
+        self._record("delete", (), {})
+
+    async def reply_chat_action(self, action, **kwargs):
+        # Cosmetic and never retried, so it is recorded but never made to fail.
+        self.calls.append(("reply_chat_action", (action,), kwargs))
+        return True
+
     # Assertion helpers
 
     def calls_to(self, name: str) -> list[tuple[tuple, dict]]:
         return [(args, kwargs) for method, args, kwargs in self.calls if method == name]
+
+    def shown(self) -> list[str]:
+        """Every text the bot posted or edited in, in order."""
+        return [args[0] for method, args, _ in self.calls if method in {"reply_text", "edit_text"}]
+
+    def typing_count(self) -> int:
+        return len(self.calls_to("reply_chat_action"))
 
     def last_text(self) -> str:
         return self.calls_to("reply_text")[-1][0][0]
@@ -226,20 +283,30 @@ def make_update(recording_message):
         *,
         caption=None,
         photos=None,
+        animation=None,
+        document=None,
         reply_to_message=None,
         date=None,
         callback_data=None,
         fail_times=0,
+        message_id=None,
+        thread_id=None,
     ):
         message = recording_message(
             text=text,
             caption=caption,
             username=username,
             photos=photos,
+            animation=animation,
+            document=document,
             reply_to_message=reply_to_message,
             date=date,
             fail_times=fail_times,
         )
+        if message_id is not None:
+            message.message_id = message_id
+        if thread_id is not None:
+            message.message_thread_id = thread_id
         update = SimpleNamespace(
             message=message,
             effective_message=message,
@@ -259,15 +326,92 @@ def make_update(recording_message):
 
 
 @pytest.fixture
-def make_photo():
-    def _make(file_size=1024, data=b"image-bytes"):
+def make_animation():
+    """A Telegram Animation/GIF document with a still thumbnail."""
+
+    def _make(
+        file_size=1024,
+        data=b"mp4-bytes",
+        width=480,
+        height=270,
+        duration=2,
+        file_unique_id="anim-1",
+        fail=False,
+        thumbnail=True,
+        thumbnail_data=b"thumb-bytes",
+        thumbnail_fail=False,
+        mime_type="video/mp4",
+    ):
+        downloads = []
+
         async def get_file(read_timeout=None, connect_timeout=None):
             async def download_as_bytearray():
+                downloads.append(file_unique_id)
+                if fail:
+                    raise RuntimeError("download broke")
                 return bytearray(data)
 
             return SimpleNamespace(download_as_bytearray=download_as_bytearray)
 
-        return SimpleNamespace(file_size=file_size, get_file=get_file)
+        thumb_downloads = []
+        thumbnail_object = None
+        if thumbnail:
+
+            async def get_thumbnail(read_timeout=None, connect_timeout=None):
+                async def download_as_bytearray():
+                    thumb_downloads.append("thumb-1")
+                    if thumbnail_fail:
+                        raise RuntimeError("thumbnail broke")
+                    return bytearray(thumbnail_data)
+
+                return SimpleNamespace(download_as_bytearray=download_as_bytearray)
+
+            thumbnail_object = SimpleNamespace(
+                file_size=len(thumbnail_data),
+                get_file=get_thumbnail,
+                width=320,
+                height=180,
+                file_unique_id="thumb-1",
+                downloads=thumb_downloads,
+            )
+
+        return SimpleNamespace(
+            file_size=file_size,
+            get_file=get_file,
+            width=width,
+            height=height,
+            duration=duration,
+            file_unique_id=file_unique_id,
+            mime_type=mime_type,
+            thumbnail=thumbnail_object,
+            downloads=downloads,
+        )
+
+    return _make
+
+
+@pytest.fixture
+def make_photo():
+    def _make(file_size=1024, data=b"image-bytes", width=1280, height=960, file_unique_id="photo-1", fail=False):
+        downloads = []
+
+        async def get_file(read_timeout=None, connect_timeout=None):
+            async def download_as_bytearray():
+                downloads.append(file_unique_id)
+                if fail:
+                    raise RuntimeError("download broke")
+                return bytearray(data)
+
+            return SimpleNamespace(download_as_bytearray=download_as_bytearray)
+
+        return SimpleNamespace(
+            file_size=file_size,
+            get_file=get_file,
+            width=width,
+            height=height,
+            file_unique_id=file_unique_id,
+            downloads=downloads,
+        )
 
     return _make
 
@@ -296,6 +440,8 @@ def make_application(settings, model=None, bot_id: int = 42, username: str = "te
             id=bot_id,
             get_me=get_me,
             send_message=AsyncMock(return_value=SimpleNamespace(message_id=0)),
+            delete_message=AsyncMock(),
+            set_message_reaction=AsyncMock(return_value=True),
         ),
     )
 

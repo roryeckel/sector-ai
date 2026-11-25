@@ -22,7 +22,13 @@ def test_defaults_match_the_shipped_configuration(make_settings):
     settings = make_settings()
 
     assert settings.default_model == "llama3.2-vision:11b-instruct-fp16"
-    assert settings.vision_model == "llama3.2-vision:11b-instruct-fp16"
+    assert settings.vision_model == ""
+    assert settings.default_model_vision is True
+    assert settings.image_max_side == 1280
+    assert settings.image_history_limit == 4
+    assert settings.image_max_attached == 32
+    assert settings.image_patch_px == 28
+    assert settings.album_wait == 1.5
     assert settings.default_svg_size == 250
     assert settings.admin_usernames == ["ex0dus"]
     assert settings.streaming_cursor == "🦙"
@@ -252,3 +258,21 @@ def test_unknown_variables_are_ignored(monkeypatch):
     monkeypatch.setenv("SECTOR_AI_NOT_A_SETTING", "whatever")
 
     assert env_only().default_model == "llama3.2-vision:11b-instruct-fp16"
+
+
+def test_uncapped_photos_need_compaction_only_in_native_mode(make_settings):
+    settings = make_settings(
+        image_max_attached=0, compaction_enabled=False, default_model_vision=False, vision_model="eyes"
+    )
+
+    assert settings.image_max_attached == 0
+
+
+def test_invalid_cache_settings_are_rejected_before_startup(make_settings):
+    import pytest
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        make_settings(prompt_cache_mode="sometimes")
+    with pytest.raises(ValidationError):
+        make_settings(prompt_cache_retention="1h")

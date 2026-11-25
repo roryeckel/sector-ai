@@ -69,7 +69,7 @@ async def test_handle_chat_does_not_block_the_event_loop(make_context, make_upda
     await handle_chat(update, context)
     ticks = await ticker
 
-    assert update.message.texts("edit_text")[-1] == "slow answer"
+    assert update.message.shown()[-1] == "slow answer"
     assert ticks >= 5, f"event loop stalled during the model call (only {ticks} ticks)"
 
 

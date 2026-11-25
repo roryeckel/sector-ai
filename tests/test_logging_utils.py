@@ -47,6 +47,22 @@ def test_redacts_the_token_in_a_request_url():
     assert redact_token(text, TOKEN) == "HTTP Request: POST https://api.telegram.org/bot<redacted>/getMe"
 
 
+def test_redacts_a_percent_encoded_token_in_a_file_download_url():
+    # httpx logs file downloads with the colon encoded, which slipped past the
+    # plain pattern and leaked a real token into a log.
+    encoded = TOKEN.replace(":", "%3A")
+    text = f'HTTP Request: GET https://api.telegram.org/file/bot{encoded}/photos/file_1.jpg "HTTP/1.1 200 OK"'
+
+    assert redact_token(text, TOKEN) == (
+        'HTTP Request: GET https://api.telegram.org/file/bot<redacted>/photos/file_1.jpg "HTTP/1.1 200 OK"'
+    )
+    assert redact_token(f"bot{OTHER_TOKEN.replace(':', '%3a')}/x", TOKEN) == "bot<redacted>/x"
+
+
+def test_redacts_a_percent_encoded_configured_secret():
+    assert redact_secrets("key=a%2Fb%3Ac", ["a/b:c"]) == "key=<redacted>"
+
+
 def test_redacts_the_bot_repr():
     assert redact_token(f"Bot[token={TOKEN}]", TOKEN) == "Bot[token=<redacted>]"
 
@@ -202,3 +218,16 @@ def test_configure_logging_redacts_real_records(isolated_root):
     assert TOKEN not in output
     assert "bot<redacted>/getMe" in output
     assert "HTTP Request: POST" in output
+
+
+def test_only_user_facing_errors_are_shown_verbatim():
+    from sector_ai.errors import UserFacingError
+    from sector_ai.logging_utils import user_error_text
+
+    shown = user_error_text(ValueError("Invalid URL 'http://10.0.0.5:11434/v1' from a library"), None)
+
+    assert shown.startswith("Something went wrong (reference ")
+    assert "10.0.0.5" not in shown
+    assert user_error_text(UserFacingError("Conversation exceeds the window."), None) == (
+        "Conversation exceeds the window."
+    )

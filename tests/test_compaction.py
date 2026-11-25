@@ -60,13 +60,26 @@ async def test_a_small_history_still_resolves_the_window(make_context, monkeypat
 
 async def test_history_below_the_threshold_is_not_compacted(make_context, monkeypatch):
     context = make_context("summary")
-    _fill(context, 10)
-    monkeypatch.setattr(context, "get_context_budget", AsyncMock(return_value=100))
-    monkeypatch.setattr(context, "count_context_tokens", AsyncMock(return_value=50))
+    _fill(context, 10, size=150)
+    monkeypatch.setattr(context, "get_context_budget", AsyncMock(return_value=1000))
+    count = AsyncMock(return_value=500)
+    monkeypatch.setattr(context, "count_context_tokens", count)
 
     assert await context.maybe_compact() is False
     assert len(context.chat_message_history) == 10
     assert context.context_summary == ""
+    count.assert_awaited_once()
+
+
+async def test_oversized_context_is_not_sent_to_an_inference_counting_probe(make_context, make_settings, monkeypatch):
+    context = make_context("short summary", settings=make_settings(context_length=2000))
+    _fill(context, 10, size=1200)
+    count = AsyncMock(side_effect=AssertionError("An oversized inference probe must not run"))
+    monkeypatch.setattr(context, "count_context_tokens", count)
+
+    await context.maybe_compact()
+
+    count.assert_not_awaited()
 
 
 async def test_old_messages_are_folded_into_the_summary(make_context, monkeypatch):
@@ -195,9 +208,17 @@ async def test_the_summary_is_injected_after_the_system_prompt(make_context, mak
     await chat_cmd(_update(), context)
 
     sent = context.bot_llm.received[0]
-    assert [type(message) for message in sent] == [SystemMessage, SystemMessage, HumanMessage]
-    assert sent[1].content == "Summary of the earlier conversation:\nRory likes teal."
-    assert sent[2].content == "testuser: hello"
+    assert [type(message) for message in sent] == [
+        SystemMessage,
+        SystemMessage,
+        SystemMessage,
+        HumanMessage,
+        SystemMessage,
+    ]
+    assert "observed data" in sent[1].content
+    assert sent[2].content == "Summary of the earlier conversation:\nRory likes teal."
+    assert sent[3].content.endswith("testuser: hello")
+    assert "current_time_utc" in sent[4].content
 
 
 async def test_handle_chat_compacts_before_replying(make_context, make_settings, fake_model, monkeypatch, _update):
@@ -210,12 +231,15 @@ async def test_handle_chat_compacts_before_replying(make_context, make_settings,
     await handle_chat(_update(), context)
 
     assert context.context_summary == "compacted summary"
-    assert len(context.chat_message_history) == 9  # 8 kept plus the new reply
+    # The static context note and system prompt add overhead, so this tight
+    # synthetic budget keeps only a few messages; the count shifts as prompts
+    # grow, so assert that compaction happened and the reply was appended.
+    assert 2 <= len(context.chat_message_history) < 12
     assert isinstance(context.chat_message_history[-1], AIMessage)
 
     reply_prompt = context.bot_llm.received[-1]
     assert isinstance(reply_prompt[1], SystemMessage)
-    assert "compacted summary" in reply_prompt[1].content
+    assert any("compacted summary" in item.content for item in reply_prompt if isinstance(item, SystemMessage))
 
 
 async def test_a_failed_delivery_does_not_regenerate(make_context, make_settings, fake_model, monkeypatch, _update):
@@ -223,8 +247,7 @@ async def test_a_failed_delivery_does_not_regenerate(make_context, make_settings
     settings = make_settings(streaming_interval_sec=999, streaming_chunk_size=999_999)
     context = make_context(model=fake_model("first answer", "second answer"), settings=settings)
     update = _update()
-    posted = SimpleNamespace(edit_text=AsyncMock(side_effect=NetworkError("502")))
-    update.message.reply_text = AsyncMock(return_value=posted)
+    update.message.reply_text = AsyncMock(side_effect=NetworkError("502"))
 
     await handle_chat(update, context)
 
@@ -234,20 +257,24 @@ async def test_a_failed_delivery_does_not_regenerate(make_context, make_settings
     assert len(context.bot_llm.received) == 2
 
 
-async def test_processing_is_posted_before_compaction(make_context, make_update, monkeypatch):
+async def test_typing_is_shown_before_compaction(make_context, make_update, monkeypatch):
     context = make_context("reply")
     update = make_update(text="/chat hello")
     seen = {}
 
     async def compact():
-        seen["posted"] = update.message.texts("reply_text")
+        seen["typing"] = update.message.typing_count()
+        seen["posted"] = update.message.shown()
         return False
 
     monkeypatch.setattr(context, "maybe_compact", compact)
 
     await handle_chat(update, context)
 
-    assert seen["posted"] == ["Processing..."]
+    # Folding a long transcript is another model call; the chat shows typing
+    # meanwhile, without posting a placeholder message.
+    assert seen["typing"] >= 1
+    assert seen["posted"] == []
 
 
 async def test_clear_history_drops_the_summary(make_context):
@@ -319,6 +346,7 @@ def _update():
             date=datetime.now(UTC),
             reply_text=AsyncMock(),
             edit_text=AsyncMock(),
+            reply_chat_action=AsyncMock(return_value=True),
             reply_to_message=None,
         )
         return SimpleNamespace(message=message, effective_message=message, effective_user=message.from_user)

@@ -1,5 +1,6 @@
 """Integration tests for /chat and the shared handle_chat path."""
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -31,8 +32,9 @@ async def test_handle_chat_streams_and_saves_history(make_context, make_update, 
     await handle_chat(update, context)
 
     message = update.message
-    assert message.texts("reply_text") == ["Processing..."]
-    assert message.texts("edit_text")[-1] == "hello world"
+    # No placeholder: the reply is posted with its text.
+    assert message.shown() == ["hello world"]
+    assert message.typing_count() >= 1
     assert [(type(m).__name__, m.content) for m in context.chat_message_history] == [("AIMessage", "hello world")]
 
 
@@ -60,7 +62,7 @@ async def test_handle_chat_can_skip_saving(make_context, make_update, quiet_sett
 
     await handle_chat(update, context, save_ai_message=False)
 
-    assert update.message.texts("edit_text")[-1] == "summary text"
+    assert update.message.shown()[-1] == "summary text"
     assert list(context.chat_message_history) == []
 
 
@@ -70,7 +72,8 @@ async def test_handle_chat_reports_model_error(make_context, make_update):
 
     await handle_chat(update, context)
 
-    assert "model unavailable" in update.message.texts("edit_text")[-1]
+    assert "Something went wrong (reference " in update.message.shown()[-1]
+    assert "model unavailable" not in update.message.shown()[-1]
 
 
 async def test_prompt_sent_to_model_has_expected_shape(make_context, make_update, quiet_settings):
@@ -81,11 +84,13 @@ async def test_prompt_sent_to_model_has_expected_shape(make_context, make_update
     await handle_chat(update, context)
 
     sent = context.bot_llm.received[0]
-    assert [type(m) for m in sent] == [SystemMessage, HumanMessage]
-    # System prompt first, then the replayed history in order.
+    assert [type(m) for m in sent] == [SystemMessage, SystemMessage, HumanMessage, SystemMessage]
+    # Static instructions first, then retained history, then the snapshot.
     assert "Telegram chatbot" in sent[0].content
-    assert sent[1].name == "alice"
-    assert sent[1].content == "alice: earlier message"
+    assert "observed data" in sent[1].content
+    assert sent[2].name == "alice"
+    assert sent[2].content == "alice: earlier message"
+    assert "current_time_utc" in sent[3].content
 
 
 async def test_handle_chat_reports_setup_failure(make_context, make_update, monkeypatch):
@@ -99,7 +104,21 @@ async def test_handle_chat_reports_setup_failure(make_context, make_update, monk
 
     await handle_chat(update, context)
 
-    assert "Error processing chat response: telegram down" in update.message.texts("edit_text")[-1]
+    assert "Error processing chat response: Something went wrong (reference " in update.message.shown()[-1]
+
+
+async def test_a_deliberate_refusal_is_shown_as_is(make_context, make_update, monkeypatch):
+    from sector_ai.errors import UserFacingError
+
+    context = make_context("unused")
+    monkeypatch.setattr(
+        context, "get_system_template_dict", AsyncMock(side_effect=UserFacingError("Conversation exceeds the window."))
+    )
+    update = make_update(text="/chat question")
+
+    await handle_chat(update, context)
+
+    assert update.message.shown()[-1] == "Error processing chat response: Conversation exceeds the window."
 
 
 async def test_handle_chat_retries_after_a_network_error(make_context, make_update, quiet_settings, monkeypatch):
@@ -115,7 +134,7 @@ async def test_handle_chat_retries_after_a_network_error(make_context, make_upda
 
     await handle_chat(update, context)
 
-    assert update.message.texts("edit_text")[-1] == "hello again"
+    assert update.message.shown()[-1] == "hello again"
     assert context.chat_message_history[-1].content == "hello again"
 
 
@@ -133,18 +152,19 @@ async def test_handle_chat_lets_a_persistent_network_error_propagate(
     assert list(context.chat_message_history) == []
 
 
-async def test_handle_chat_retries_the_placeholder(make_context, make_update, quiet_settings, monkeypatch):
-    monkeypatch.setattr("sector_ai.chat.asyncio.sleep", AsyncMock())
+async def test_handle_chat_retries_posting_the_reply(make_context, make_update, quiet_settings, monkeypatch):
+    monkeypatch.setattr("sector_ai.retry.asyncio.sleep", AsyncMock())
     context = make_context("hello", settings=quiet_settings)
     update = make_update(text="/chat hi")
-    posted = AsyncMock()
-    posted.edit_text = AsyncMock()
+    posted = SimpleNamespace(message_id=5, chat_id=1, edit_text=AsyncMock())
     update.message.reply_text = AsyncMock(side_effect=[NetworkError("blip"), posted])
 
     await handle_chat(update, context)
 
     assert update.message.reply_text.await_count == 2
-    assert posted.edit_text.await_args[0][0] == "hello"
+    assert update.message.reply_text.await_args[0][0] == "hello"
+    posted.edit_text.assert_not_awaited()
+    assert context.chat_message_history[-1].content == "hello"
 
 
 async def test_chat_cmd_without_argument_prompts_for_text(make_context, make_update):
@@ -167,3 +187,11 @@ async def test_chat_cmd_records_user_message(make_context, make_update, quiet_se
     assert isinstance(context.chat_message_history[0], HumanMessage)
     assert context.chat_message_history[0].content == "testuser: tell me a joke"
     assert isinstance(context.chat_message_history[1], AIMessage)
+
+
+async def test_plain_reply_checks_actual_custom_prompt_budget(make_context, make_settings, make_update):
+    context = make_context("unused", settings=make_settings(context_length=2000))
+    update = make_update(text="/chat hi")
+    await handle_chat(update, context, system_prompt="x" * 12000)
+    assert context.bot_llm.call_count == 0
+    assert "context window" in update.message.shown()[-1]

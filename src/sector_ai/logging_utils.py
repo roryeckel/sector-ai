@@ -16,9 +16,12 @@ The log level is left alone; the request lines are still useful, only the
 credential is removed.
 """
 
+import json
 import logging
 import re
+import secrets as secrets_module
 from collections.abc import Iterable
+from urllib.parse import quote
 
 from .settings import Settings
 
@@ -26,7 +29,9 @@ LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 
 # A Telegram token is "<bot id>:<35 characters>". Thirty is a low enough floor to
 # catch a pasted URL while staying far away from ordinary prose.
-TOKEN_IN_URL = re.compile(r"bot\d+:[A-Za-z0-9_-]{30,}")
+#: File downloads put the token in the URL path percent-encoded ("%3A" for the
+#: colon), and httpx logs that URL as is, so both forms must match.
+TOKEN_IN_URL = re.compile(r"bot\d+(?::|%3A)[A-Za-z0-9_-]{30,}", re.IGNORECASE)
 
 # Credentials registered after startup, kept for the process lifetime so a
 # rotated key does not make the previous one loggable again.
@@ -59,6 +64,11 @@ def register_secrets(settings: Settings | None) -> None:
     _REGISTERED_SECRETS.update(settings_secrets(settings))
 
 
+def register_secret_values(values: Iterable[str]) -> None:
+    """Register credentials resolved from trusted MCP environment references."""
+    _REGISTERED_SECRETS.update(value for value in values if value)
+
+
 def redact_secrets(text: str, secrets: Iterable[str]) -> str:
     """Replace token-shaped URLs and any configured secret in ``text``."""
     text = TOKEN_IN_URL.sub("bot<redacted>", text)
@@ -66,7 +76,9 @@ def redact_secrets(text: str, secrets: Iterable[str]) -> str:
     # rest of the longer credential visible.
     for secret in sorted(secrets, key=len, reverse=True):
         if secret:
-            text = text.replace(secret, "<redacted>")
+            # A credential inside a URL may be percent-encoded.
+            for form in {secret, quote(secret, safe=""), quote(secret)}:
+                text = text.replace(form, "<redacted>")
     return text
 
 
@@ -75,9 +87,52 @@ def redact_token(text: str, token: str) -> str:
     return redact_secrets(text, [token])
 
 
-def redact_for_user(text: str, settings: Settings | None) -> str:
+def redact_for_user(text: str, settings: Settings | None, *, json_escaped: bool = False) -> str:
     """Redact configured secrets before showing an error to a chat participant."""
-    return redact_secrets(text, settings_secrets(settings) | _REGISTERED_SECRETS)
+    secrets = settings_secrets(settings) | _REGISTERED_SECRETS
+    if json_escaped:
+        # MCP text blocks may already contain serialized JSON, including JSON
+        # nested in another JSON string. Scrub those representations before
+        # outer result encoding. Bound expansion by the actual input length.
+        pending = set(secrets)
+        while pending:
+            variants = {
+                json.dumps(secret, ensure_ascii=ascii_only)[1:-1] for secret in pending for ascii_only in (True, False)
+            }
+            pending = {value for value in variants if value not in secrets and len(value) <= len(text)}
+            secrets.update(pending)
+    return redact_secrets(text, secrets)
+
+
+logger = logging.getLogger(__name__)
+
+#: How a failure the chat should not see in detail starts.
+GENERIC_ERROR = "Something went wrong"
+
+
+def user_error_text(error: BaseException, settings: Settings | None, *, log_traceback: bool = True) -> str:
+    """What a chat participant sees for ``error``.
+
+    Only :class:`UserFacingError` is written for a chat participant, so its text
+    is shown, redacted. Anything else, including a plain ``ValueError`` from a
+    library, can name internal hosts, URLs or file paths, so the chat gets a
+    short reference and the full error is logged under it.
+    """
+    from .errors import UserFacingError
+
+    if isinstance(error, TimeoutError):
+        return "The request timed out."
+    if isinstance(error, UserFacingError) and str(error).strip():
+        return redact_for_user(str(error), settings)
+    reference = secrets_module.token_hex(3)
+    logger.error(
+        "Error reference %s: %s: %s",
+        reference,
+        type(error).__name__,
+        error,
+        exc_info=error if log_traceback else None,
+    )
+    return f"{GENERIC_ERROR} (reference {reference})."
 
 
 class TokenRedactingFormatter(logging.Formatter):

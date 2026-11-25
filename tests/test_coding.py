@@ -1,5 +1,6 @@
 """Contract tests for /code, /html and /svg: what actually goes out."""
 
+import json
 from io import BytesIO
 
 import pytest
@@ -10,6 +11,13 @@ from sector_ai.coding import code_cmd, html_cmd, svg_cmd
 VALID_SVG = (
     '<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"><rect width="50" height="50" fill="red"/></svg>'
 )
+
+
+@pytest.fixture(autouse=True)
+def local_context_budget(monkeypatch):
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setattr("sector_ai.sector_context.SectorContext.get_context_budget", AsyncMock(return_value=8192))
 
 
 async def test_code_cmd_sends_markdown(make_context, make_update):
@@ -43,7 +51,7 @@ async def test_code_cmd_prompt_includes_user_input_and_template_vars(make_contex
 
     await code_cmd(update, context)
 
-    sent = context.bot_llm.received[0][0].content
+    sent = "\n".join(message.content for message in context.bot_llm.received[0])
     assert "print one" in sent
     assert "4096" in sent  # MAX_LEN was substituted
 
@@ -77,29 +85,32 @@ async def test_html_cmd_sends_html_document(make_context, make_update):
 
     _, kwargs = update.message.calls_to("reply_document")[0]
     assert kwargs["filename"] == "Website.html"
-    assert kwargs["caption"] == "a page"
+    # Never the request as a caption: in the agent path the model writes it.
+    assert kwargs["caption"] is None
     assert isinstance(kwargs["document"], BytesIO)
     assert kwargs["document"].getvalue() == b"<html><body>hi</body></html>"
 
 
-async def test_html_cmd_retries_before_succeeding(make_context, make_update):
+async def test_html_cmd_does_not_regenerate_a_rejected_delivery(make_context, make_update):
     context = make_context("first page", "second page")
     update = make_update(text="/html a page", fail_times=1)
 
     await html_cmd(update, context)
 
-    assert len(update.message.calls_to("reply_document")) == 2
-    assert "Failed" not in update.message.texts("reply_text")
+    assert len(update.message.calls_to("reply_document")) == 1
+    assert context.bot_llm.call_count == 1
+    assert json.loads(context.chat_message_history[-1].content)["status"] == "delivery_failed"
 
 
-async def test_html_cmd_gives_up_after_three_attempts(make_context, make_update):
+async def test_html_cmd_records_generated_source_when_delivery_fails(make_context, make_update):
     context = make_context("a", "b", "c")
-    update = make_update(text="/html a page", fail_times=3)
+    update = make_update(text="/html a page", fail_times=1)
 
     await html_cmd(update, context)
 
-    assert len(update.message.calls_to("reply_document")) == 3
-    assert update.message.texts("reply_text")[-1] == "Failed to generate valid HTML snippet."
+    assert len(update.message.calls_to("reply_document")) == 1
+    assert json.loads(context.chat_message_history[-1].content)["html"] == "a"
+    assert "reply_document failed" in update.message.texts("reply_text")[-1]
 
 
 async def test_svg_cmd_sends_png_photo(make_context, make_update):

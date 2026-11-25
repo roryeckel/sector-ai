@@ -5,7 +5,9 @@ from functools import wraps
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import BadRequest
 
+from .history import scoped_control
 from .sector_context import SectorContext
+from .typing_indicator import typing
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +20,10 @@ def admin_only(func):
         ):
             return await func(update, context, *args, **kwargs)
 
-        logger.warning(f"Unauthorized access attempt by user: {update.effective_user.username} in update {update}")
+        user = getattr(update, "effective_user", None)
+        logger.warning(
+            "Unauthorized access attempt by user: %s in update %s", getattr(user, "username", None) or "unknown", update
+        )
         text = "You are not authorized to use this command."
         if update.message is not None:
             await update.message.reply_text(text)
@@ -30,6 +35,7 @@ def admin_only(func):
     return wrapper
 
 
+@scoped_control
 async def clear_cmd(update: Update, context: SectorContext) -> None:
     context.clear_history()
     context.chat_system_prompt = context.settings.system_prompts.default
@@ -37,22 +43,47 @@ async def clear_cmd(update: Update, context: SectorContext) -> None:
 
 
 @admin_only
-async def compact_cmd(update: Update, context: SectorContext) -> None:
-    # The count and the summary are both model/HTTP calls; say something first.
-    status = await update.message.reply_text("Compacting...")
-    before = await context.count_context_tokens()
-    try:
-        result = await context.compact()
-    except Exception:
-        logger.exception("Manual compaction failed")
-        await status.edit_text("Compaction failed; the history was left unchanged. Check the logs.")
+@scoped_control
+async def usage_cmd(update: Update, context: SectorContext) -> None:
+    header = (
+        f"Usage for {context.get_model()} via {context.settings.llm_provider} at {context.endpoint_host} "
+        f"(cache {context.cache_backend()}, stream usage {context.settings.stream_usage})"
+    )
+    rows = context.usage_summary()
+    if not rows:
+        await update.message.reply_text(f"{header}\nNo usage recorded yet.")
         return
-    if not result["compacted"]:
-        await status.edit_text("Not enough history to compact yet.")
-        return
+    lines = [header]
+    for row in rows:
+        hit = "no cache data" if row["hit_rate"] is None else f"{row['hit_rate']:.1f}% hit"
+        lines.append(
+            f"{row['model']} {row['workload']}: {row['requests']} requests, {row['input_tokens']} in / "
+            f"{row['output_tokens']} out, cache {row['cache_read']} read / "
+            f"{row['cache_write']} write ({hit})"
+        )
+    await update.message.reply_text("\n".join(lines)[:4096])
 
-    after = await context.count_context_tokens()
-    await status.edit_text(f"Compacted {result['evicted']} messages into a summary: {before} → {after} tokens.")
+
+@admin_only
+@scoped_control
+async def compact_cmd(update: Update, context: SectorContext) -> None:
+    # The count and the summary are both model/HTTP calls; show that a reply is coming.
+    async with typing(update.message):
+        before = await context.count_context_tokens()
+        try:
+            result = await context.compact()
+        except Exception:
+            logger.exception("Manual compaction failed")
+            await update.message.reply_text("Compaction failed; the history was left unchanged. Check the logs.")
+            return
+        if not result["compacted"]:
+            await update.message.reply_text("Not enough history to compact yet.")
+            return
+
+        after = await context.count_context_tokens()
+        await update.message.reply_text(
+            f"Compacted {result['evicted']} messages into a summary: {before} → {after} tokens."
+        )
 
 
 # async def model_cmd(update: Update, context: SectorContext) -> None:
@@ -221,6 +252,7 @@ async def temperature_cmd(update: Update, context: SectorContext) -> None:
 
 
 @admin_only
+@scoped_control
 async def system_prompt_cmd(update: Update, context: SectorContext) -> None:
     new_system_prompt = update.message.text.split(maxsplit=1)
     if len(new_system_prompt) > 1:

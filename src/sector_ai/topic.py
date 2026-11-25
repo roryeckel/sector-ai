@@ -1,47 +1,12 @@
-import logging
-from typing import List
-
-from langchain_core.exceptions import OutputParserException
-from langchain_core.output_parsers import PydanticOutputParser
-from pydantic import BaseModel, Field
 from telegram import Update
-from telegram.constants import PollLimit
 
+from .capabilities import TopicContent as TopicPoll
 from .sector_context import SectorContext
 
-logger = logging.getLogger(__name__)
-
-
-class TopicPoll(BaseModel):
-    title: str = Field(description="A short title about the chat topic summarization")
-    topics: List[str] = Field(
-        description=f"The {PollLimit.MIN_OPTION_NUMBER} or more relevant topics in the chat, must be less than {PollLimit.MAX_OPTION_NUMBER + 1} topics."
-        f"Preferrably 5 topics unless otherwise specified. The length of each topic must be less than {PollLimit.MAX_OPTION_LENGTH} characters."
-    )
+__all__ = ["TopicPoll", "topic_poll_cmd"]
 
 
 async def topic_poll_cmd(update: Update, context: SectorContext) -> None:
-    system_template_dict = await context.get_system_template_dict()
-    parser = PydanticOutputParser(pydantic_object=TopicPoll)
-    prompt_template = context.get_templated_messages(system_prompt=context.settings.system_prompts.topic_poll)
-    # ChatOllama converts this to its native JSON mode; ChatOpenAI uses
-    # response_format on Chat Completions and text.format on Responses.
-    json_model = context.bot_llm.bind(response_format={"type": "json_object"})
-    chain = prompt_template | json_model | parser
-    poll_response = await chain.ainvoke(
-        {"format_instructions": parser.get_format_instructions(), **system_template_dict}
-    )
-    logger.info(f"Topic Poll Response: {poll_response}")
+    from .agent import run_agent
 
-    if not (PollLimit.MIN_OPTION_NUMBER <= len(poll_response.topics) <= PollLimit.MAX_OPTION_NUMBER):
-        logger.error(f"Poll Error: Invalid number of topics: {len(poll_response.topics)}")
-        raise OutputParserException(
-            f"Poll must have between {PollLimit.MIN_OPTION_NUMBER} and {PollLimit.MAX_OPTION_NUMBER} topics."
-        )
-
-    for topic in poll_response.topics:
-        if len(topic) > PollLimit.MAX_OPTION_LENGTH:
-            logger.error(f"Poll Error: Topic length exceeds limit: {topic}")
-            raise OutputParserException(f"Each topic must be less than {PollLimit.MAX_OPTION_LENGTH} characters.")
-
-    await update.message.reply_poll(poll_response.title or "Topics", poll_response.topics, is_anonymous=False)
+    await run_agent(update, context, command="topic")

@@ -2,6 +2,7 @@
 
 from unittest.mock import MagicMock
 
+import pytest
 from telegram import MessageEntity
 
 from sector_ai.telegram_format import (
@@ -92,6 +93,11 @@ def test_a_preview_fits_one_message_including_the_cursor():
     assert utf16_len(text) <= MESSAGE_LIMIT
 
 
+@pytest.mark.parametrize("text", ["", "  \n", "\t"])
+def test_a_preview_with_no_visible_text_has_no_cursor(text):
+    assert render_preview(text, cursor="🦙") == ("", [])
+
+
 def test_splitting_clips_entities_at_the_break():
     text, entities = render_markdown("**" + "y" * 5000 + "**")
 
@@ -113,3 +119,30 @@ def test_chunks_stay_plain_when_rendering_is_disabled():
     chunks = render_chunks("**bold**", enabled=False)
 
     assert chunks == [("**bold**", [])]
+
+
+def test_the_metadata_envelope_is_removed_anywhere_in_a_reply():
+    from sector_ai.chat_metadata import strip_internal_envelope
+
+    envelope = '[telegram {"message_id": 5, "sender": {"username": "alice"}}]'
+
+    assert strip_internal_envelope(f"hello {envelope} world") == "hello  world"
+    assert strip_internal_envelope(f"first line\n{envelope}\nsecond line") == "first line\nsecond line"
+    assert strip_internal_envelope(f"{envelope} after") == "after"
+    assert strip_internal_envelope(f"a {envelope} b {envelope} c") == "a  b  c"
+
+
+def test_a_partial_envelope_is_held_back_until_it_completes():
+    from sector_ai.chat_metadata import strip_internal_envelope
+
+    assert strip_internal_envelope('answer [telegram {"message_id": 5') == "answer"
+    assert strip_internal_envelope("answer [telegram {") == "answer"
+    # Once it completes, the rest of the reply is shown.
+    assert strip_internal_envelope('answer [telegram {"message_id": 5}] done') == "answer  done"
+
+
+def test_text_that_only_looks_like_an_envelope_is_kept():
+    from sector_ai.chat_metadata import strip_internal_envelope
+
+    assert strip_internal_envelope("see the [telegram rules] page") == "see the [telegram rules] page"
+    assert strip_internal_envelope("quoted [telegram not-json] text") == "quoted [telegram not-json] text"

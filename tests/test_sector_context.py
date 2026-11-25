@@ -266,7 +266,18 @@ def test_load_model_uses_the_openai_backend(make_context, make_settings):
         "default_headers": {"X-Test": "yes"},
         "use_responses_api": False,
         "max_retries": 0,
+        "stream_usage": False,
     }
+
+
+def test_load_model_enables_stream_usage_when_requested(make_context, make_settings):
+    settings = make_settings(llm_provider="openai", stream_usage=True)
+    context = make_context("unused", settings=settings)
+
+    with patch("sector_ai.sector_context.ChatOpenAI") as chat_openai:
+        context.load_model("gpt")
+
+    assert chat_openai.call_args.kwargs["stream_usage"] is True
 
 
 def test_load_model_keeps_a_configured_openai_key(make_context, make_settings):
@@ -713,6 +724,19 @@ async def test_get_username_is_cached(make_context):
     assert len(calls) == 1
 
 
+async def test_get_username_reads_the_profile_cached_at_startup(make_context):
+    """No Telegram request on the engagement path; a connect timeout killed the turn."""
+    context = make_context("unused")
+
+    async def get_me():
+        raise AssertionError("get_username must not ask Telegram after startup")
+
+    context.application.bot.username = "cached_bot"
+    context.application.bot.get_me = get_me
+
+    assert await context.get_username() == "cached_bot"
+
+
 async def test_get_model_details_returns_empty_on_failure(make_context):
     context = make_context("unused")
 
@@ -886,12 +910,31 @@ async def test_provisional_ollama_capacity_is_refreshed(make_context, monkeypatc
         assert await context.get_context_length() == 4096
 
 
-def test_estimate_is_conservative_for_non_ascii(make_context):
+def test_estimate_is_cautious_by_script_without_failing_ordinary_chats(make_context):
     context = make_context("unused")
 
-    # Each non-ASCII character is treated as four tokens, so an emoji-heavy
-    # prompt is never assumed to fit because of its character count.
-    assert context._estimate_token_count([HumanMessage(content="你" * 100)]) == 400
+    def estimate(text):
+        return context._estimate_token_count([HumanMessage(content=text)])
+
+    # Above typical tokenizer rates for each script, so a prompt is never
+    # assumed to fit because of its character count...
+    assert estimate("你" * 100) == 150
+    assert estimate("🔥" * 100) == 300
+    # ...but not fourfold: a 2,000-character Russian message (about 1-2k real
+    # tokens) fits an 8k window instead of failing the turn.
+    assert estimate("Привет" * 333) == 2498
+    assert estimate("hello " * 100) == 150
+
+
+async def test_an_estimate_just_over_the_line_is_confirmed_by_an_exact_count(make_context, make_settings, monkeypatch):
+    context = make_context("unused", settings=make_settings(context_length=1000))
+    monkeypatch.setattr(context, "count_context_tokens", AsyncMock(return_value=600))
+    context.conversation_data["token_count"] = {"fingerprint": None, "tokens": 600, "exact": True}
+
+    assert await context.prompt_exceeds(950, 1000) is False
+    # Over the whole window, no probe is sent at all.
+    assert await context.prompt_exceeds(1500, 1000) is True
+    assert context.count_context_tokens.await_count == 1
 
 
 async def test_a_transient_context_length_failure_is_not_cached(make_context, make_settings):
@@ -953,3 +996,148 @@ def test_bot_llm_rebuilds_when_settings_change(make_context, make_settings):
 
     with patch("sector_ai.sector_context.ChatOllama") as second:
         assert context.bot_llm is second.return_value
+
+
+def test_a_reply_chain_in_an_ordinary_group_stays_in_the_main_conversation(make_context, make_update):
+    context = make_context()
+    main = make_update(text="hello")
+    context.bind_update(main)
+    context.conversation_data["marker"] = "main"
+
+    reply = make_update(text="a reply", thread_id=77)
+    reply.message.is_topic_message = False
+    context.bind_update(reply)
+
+    assert context.conversation_data.get("marker") == "main"
+    assert "topics" not in context.chat_data
+
+
+def test_a_forum_topic_gets_its_own_conversation(make_context, make_update):
+    context = make_context()
+    context.bind_update(make_update(text="hello"))
+    context.conversation_data["marker"] = "main"
+
+    context.bind_update(make_update(text="in a topic", thread_id=77))
+
+    assert "marker" not in context.conversation_data
+
+
+def test_the_token_count_cache_survives_a_clock_change(make_context, make_update):
+    context = make_context("unused")
+    context.bind_update(make_update(text="hello"))
+    first = context._token_count_fingerprint(context.context_metadata_messages())
+    context._context_time = "2099-01-01T00:00:00Z"
+
+    assert context._token_count_fingerprint(context.context_metadata_messages()) == first
+
+
+def test_system_prompt_and_autoreply_are_per_topic(make_context, make_update):
+    context = make_context()
+    context.bind_update(make_update(text="main"))
+    context.chat_system_prompt = "main prompt"
+    context.chat_autoreply_mode = False
+
+    context.bind_update(make_update(text="topic", thread_id=22))
+    assert context.chat_system_prompt == context.settings.system_prompts.default
+    assert context.chat_autoreply_mode is True
+    context.chat_system_prompt = "topic prompt"
+
+    context.bind_update(make_update(text="main again"))
+    assert context.chat_system_prompt == "main prompt"
+    assert context.chat_autoreply_mode is False
+
+
+def test_a_compacted_shared_event_does_not_come_back(make_context):
+    context = make_context()
+    context.record_shared_chat_event(HumanMessage(content="bot was promoted", additional_kwargs={"telegram": {}}))
+    # Compaction folds it into the summary.
+    context.chat_message_history = []
+
+    assert context.shared_chat_events() == []
+
+
+def test_a_split_bot_message_keeps_its_speaker_for_the_summary():
+    from sector_ai.sector_context import SectorContext as Context
+
+    chunk, rest = Context._take_summary_chunk([AIMessage(content="x" * 4000)], 200)
+
+    assert isinstance(chunk[0], AIMessage)
+    assert all(isinstance(item, AIMessage) for item in rest)
+
+
+def test_uncapped_photos_need_compaction(make_settings):
+    import pytest as _pytest
+    from pydantic import ValidationError
+
+    with _pytest.raises(ValidationError, match="never released"):
+        make_settings(image_max_attached=0, compaction_enabled=False)
+
+
+def test_script_weights_cover_scripts_that_tokenize_poorly(make_context):
+    context = make_context("unused")
+
+    def estimate(text):
+        return context._estimate_token_count([HumanMessage(content=text)])
+
+    assert estimate("Α" * 100) == 200  # Greek uppercase
+    assert estimate("ກ" * 100) == 250  # Lao: byte fallback
+    assert estimate("ע" * 100) == 175  # Hebrew
+
+
+def test_abandoned_placeholders_are_bounded(make_context):
+    context = make_context()
+    for message_id in range(40):
+        context.mark_placeholder_unsettled(SimpleNamespace(message_id=message_id, chat_id=1))
+
+    assert len(context.conversation_data["abandoned_placeholders"]) == 16
+
+
+def test_positive_int_accepts_only_real_positive_numbers():
+    from sector_ai.sector_context import _positive_int
+
+    assert _positive_int(True) is None
+    assert _positive_int(3.9) == 3
+    assert _positive_int(-2.0) is None
+    assert _positive_int(" 12 ") == 12
+    assert _positive_int("not a number") is None
+
+
+def test_sent_by_bot_tracks_only_recorded_sends(make_context):
+    context = make_context()
+    context.remember_sent(SimpleNamespace(message_id=5))
+
+    assert context.sent_by_bot(5) is True
+    assert context.sent_by_bot(6) is False
+
+
+def test_cache_settings_ignored_by_the_backend_are_reported(make_context, make_settings):
+    wrong_ttl = make_context("unused", settings=make_settings(llm_provider="ollama", prompt_cache_ttl="30m"))
+    wrong_retention = make_context(
+        "unused", settings=make_settings(llm_provider="ollama", prompt_cache_retention="24h")
+    )
+
+    assert any("only applies to OpenAI" in warning for warning in wrong_ttl.cache_setting_warnings())
+    assert any("RETENTION only applies" in warning for warning in wrong_retention.cache_setting_warnings())
+
+
+def test_usage_summary_tolerates_bad_state(make_context):
+    context = make_context()
+    context.bot_data["usage_stats"] = []
+    assert context.usage_summary() == []
+
+    context.bot_data["usage_stats"] = {("model", "workload"): "not a row"}
+    assert context.usage_summary() == []
+
+
+def test_braces_in_a_stored_system_prompt_are_literal(make_context):
+    # /system and /characterize accept free text. A brace used to be read as a
+    # format field, and "Invalid format specifier" failed every later turn.
+    context = make_context()
+    context.chat_system_prompt = 'Reply as JSON like {"answer": 1}. You are {USERNAME}; limit {MAX_LEN}.'
+
+    messages = context.get_templated_messages().format_messages(USERNAME="testbot", MAX_LEN=4096)
+
+    prompt = messages[0].content
+    assert '{"answer": 1}' in prompt
+    assert "You are testbot" in prompt
+    assert "limit 4096" in prompt

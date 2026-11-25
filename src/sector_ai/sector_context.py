@@ -1,26 +1,60 @@
 import asyncio
+import json
 import logging
+import math
+import re
 from time import time
 from typing import Optional
+from urllib.parse import urlsplit
 
 import httpx
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import BaseMessage, ChatMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, BaseMessage, ChatMessage, HumanMessage, SystemMessage
 from langchain_core.prompts import ChatPromptTemplate, SystemMessagePromptTemplate
 from langchain_ollama.chat_models import ChatOllama
 from langchain_openai import ChatOpenAI
 from telegram import Message
 from telegram.constants import MessageLimit
+from telegram.error import BadRequest, NetworkError
 from telegram.ext import Application, CallbackContext
 
+from .chat_metadata import (
+    actor_metadata,
+    context_message,
+    context_messages,
+    message_metadata,
+    render_prompt_message,
+    strip_internal_envelope,
+    text_value,
+    utc_now,
+)
+from .gifs import animation_record
+from .history import history_groups, history_text, plain_history, prompt_history_text, safe_cut
+from .images import (
+    attach_images,
+    attached_count,
+    describe_pending_images,
+    detach_images,
+    has_image_blocks,
+    image_mode,
+    image_signature,
+    message_image_tokens,
+    photo_records,
+    with_images,
+)
 from .logging_utils import register_secrets
 from .message_text import message_refused, message_text
+from .prompts import AGENT_SYSTEM_PROMPT
 from .settings import Settings
+from .usage import record_usage
 
 logger = logging.getLogger(__name__)
 
 # Used when neither the settings nor the server can provide a context window.
 DEFAULT_CONTEXT_LENGTH = 8192
+
+# Placeholders awaiting cleanup. Old ones are dropped rather than retried forever.
+MAX_ABANDONED_PLACEHOLDERS = 16
 
 
 def _positive_int(value: object) -> Optional[int]:
@@ -39,17 +73,67 @@ def _positive_int(value: object) -> Optional[int]:
     return None
 
 
-def _estimate_text_tokens(text: str) -> int:
-    """A conservative character-based bound.
+_VOLATILE_TIME = re.compile(r'"current_time_utc":"[^"]*"')
 
-    Non-ASCII scripts and emoji can run to several tokens per character, while
-    ASCII prose stays near four characters per token. Overestimating only costs
-    an exact count; underestimating would let an oversized prompt through.
+
+#: Placeholders a stored system prompt may use; everything else is literal.
+PROMPT_PLACEHOLDERS = ("USERNAME", "MAX_LEN")
+
+
+def _escape_prompt_braces(template: str) -> str:
+    """Escape every brace in a stored prompt except the known placeholders."""
+    escaped = template.replace("{", "{{").replace("}", "}}")
+    for field in PROMPT_PLACEHOLDERS:
+        escaped = escaped.replace("{{" + field + "}}", "{" + field + "}")
+    return escaped
+
+
+def _character_tokens(character: str) -> float:
+    """A cautious per-character token cost, by script.
+
+    ASCII prose runs near four characters per token. Alphabetic scripts such as
+    Cyrillic, Greek, Arabic or accented Latin stay at or below one token per
+    character on current tokenizers; CJK and Hangul at about one to one and a
+    half; emoji and other characters outside the Basic Multilingual Plane can
+    take several. Every weight sits above typical rates, so an estimate errs
+    high, but not by the fourfold that would fail ordinary non-English chats.
+    """
+    code = ord(character)
+    if code < 128:
+        return 0.25
+    if code > 0xFFFF or 0x2600 <= code <= 0x27BF:
+        return 3.0
+    if 0x2E80 <= code <= 0x9FFF or 0xAC00 <= code <= 0xD7AF or 0xF900 <= code <= 0xFAFF or 0xFF00 <= code <= 0xFFEF:
+        return 1.5
+    if 0x0370 <= code <= 0x03FF:
+        # Greek: uppercase runs are split by byte-fallback tokenizers.
+        return 2.0
+    if (
+        0x00C0 <= code <= 0x024F  # Latin extended
+        or 0x0400 <= code <= 0x04FF  # Cyrillic
+        or 0x0600 <= code <= 0x06FF  # Arabic
+        or 0x0750 <= code <= 0x077F  # Arabic supplement
+        or 0x08A0 <= code <= 0x08FF  # Arabic extended
+    ):
+        return 1.25
+    if 0x0590 <= code <= 0x05FF:
+        # Hebrew with vowel points is tokenized poorly.
+        return 1.75
+    # Everything else (Indic, Thai, Lao, Myanmar, Khmer, rare scripts, symbols)
+    # is byte-fallback territory for several tokenizers: two to three tokens
+    # per character. Overestimating here only costs an exact count.
+    return 2.5
+
+
+def _estimate_text_tokens(text: str) -> int:
+    """A cautious character-based bound; see ``_character_tokens``.
+
+    Overestimating only costs an exact count; underestimating would let an
+    oversized prompt through.
     """
     if not text:
         return 0
-    ascii_chars = sum(1 for character in text if ord(character) < 128)
-    return max(1, ascii_chars // 4 + (len(text) - ascii_chars) * 4)
+    return max(1, math.ceil(sum(_character_tokens(character) for character in text)))
 
 
 def _split_text(text: str, limit: int) -> list[str]:
@@ -58,7 +142,7 @@ def _split_text(text: str, limit: int) -> list[str]:
     start = 0
     tokens = 0.0
     for index, character in enumerate(text):
-        cost = 0.25 if ord(character) < 128 else 4.0
+        cost = _character_tokens(character)
         if tokens + cost > limit and index > start:
             pieces.append(text[start:index])
             start = index
@@ -73,6 +157,286 @@ class SectorContext(CallbackContext):
     def __init__(self, application: Application, chat_id: Optional[int] = None, user_id: Optional[int] = None):
         super().__init__(application=application, chat_id=chat_id, user_id=user_id)
         self._username = None
+        self._message_thread_id = 0
+        self._request_model = None
+        self._request_model_name = None
+        self._context_time = None
+        # The debounced turn this context is running, if any.
+        self._turn = None
+
+    def bind_update(self, update) -> None:
+        message = update.effective_message
+        # Replies in ordinary supergroups carry a thread ID too, naming the
+        # reply chain. Only a forum (or private-chat) topic is a conversation.
+        thread = getattr(message, "message_thread_id", None)
+        self.bind_topic(thread if getattr(message, "is_topic_message", False) is True else None)
+        chat = getattr(update, "effective_chat", None) or getattr(update.effective_message, "chat", None)
+        metadata = self.chat_data.setdefault("chat_metadata", {})
+        identifier = getattr(chat, "id", None)
+        if type(identifier) is int:
+            metadata["id"] = identifier
+        for key in ("title", "type", "username"):
+            value = text_value(getattr(chat, key, None))
+            if value:
+                metadata[key] = value
+        new_title = text_value(getattr(update.effective_message, "new_chat_title", None))
+        if new_title:
+            metadata["title"] = new_title
+
+    def bind_topic(self, thread_id=0) -> None:
+        """Bind updates such as poll results that have no effective message."""
+        self._message_thread_id = thread_id if type(thread_id) is int else 0
+        self._context_time = utc_now()
+        if self._message_thread_id:
+            self.conversation_data.setdefault("topic_metadata", {})["id"] = self._message_thread_id
+
+    def remember_placeholder(self, message) -> None:
+        """Track the reply being streamed so a cursor it leaves behind can be cleaned."""
+        message_id = getattr(message, "message_id", None)
+        if type(message_id) is int and type(self._chat_id) is int:
+            previous = self.conversation_data.get("pending_placeholder")
+            if self._unsettled(previous):
+                # An earlier reply in this turn still shows a cursor. A later
+                # reply must not take over its slot and forget it.
+                self._track_abandoned(previous)
+            self.conversation_data["pending_placeholder"] = {
+                "message_id": message_id,
+                "chat_id": self._chat_id,
+            }
+            self.conversation_data.pop("placeholder_unsettled", None)
+
+    def _unsettled(self, pending) -> bool:
+        """Whether ``pending`` is the message whose final edit failed."""
+        return isinstance(pending, dict) and self.conversation_data.get("placeholder_unsettled") == pending.get(
+            "message_id"
+        )
+
+    def settle_placeholder(self, message) -> None:
+        """Record that the final edit of ``message`` replaced its streaming cursor."""
+        if self.conversation_data.get("placeholder_unsettled") == getattr(message, "message_id", None):
+            self.conversation_data.pop("placeholder_unsettled", None)
+
+    def mark_placeholder_unsettled(self, message) -> None:
+        """The final edit of ``message`` failed, so it may still show the cursor.
+
+        Only that message is cleaned up later. A delivered reply, or a failure
+        before any message existed, never marks anything.
+        """
+        message_id = getattr(message, "message_id", None)
+        if type(message_id) is not int:
+            return
+        pending = self.conversation_data.get("pending_placeholder")
+        if isinstance(pending, dict) and pending.get("message_id") == message_id:
+            self.conversation_data["placeholder_unsettled"] = message_id
+            return
+        chat_id = getattr(message, "chat_id", None)
+        chat_id = chat_id if type(chat_id) is int else self._chat_id
+        if type(chat_id) is int:
+            # Not the tracked reply (an already posted message passed in), so
+            # it gets its own cleanup slot.
+            self._track_abandoned({"message_id": message_id, "chat_id": chat_id})
+
+    def _track_abandoned(self, pending: dict) -> None:
+        """Queue one placeholder for cleanup at the next turn, keeping a few."""
+        abandoned = self.conversation_data.setdefault("abandoned_placeholders", [])
+        abandoned.append(pending)
+        del abandoned[:-MAX_ABANDONED_PLACEHOLDERS]
+
+    def finish_placeholder(self) -> None:
+        """Forget the tracked reply unless its final edit left a cursor behind."""
+        if self._unsettled(self.conversation_data.get("pending_placeholder")):
+            # Keep pending_placeholder so the next turn removes the artifact.
+            return
+        self.clear_pending_placeholder()
+
+    def clear_pending_placeholder(self) -> None:
+        self.conversation_data.pop("pending_placeholder", None)
+        self.conversation_data.pop("placeholder_unsettled", None)
+
+    async def remove_pending_placeholder(self) -> None:
+        """Remove placeholders abandoned by earlier failed deliveries."""
+        abandoned = self.conversation_data.get("abandoned_placeholders") or []
+        kept = [item for item in abandoned if not await self._delete_placeholder(item)]
+        if kept:
+            self.conversation_data["abandoned_placeholders"] = kept
+        else:
+            self.conversation_data.pop("abandoned_placeholders", None)
+        pending = self.conversation_data.get("pending_placeholder")
+        if not isinstance(pending, dict):
+            return
+        if await self._delete_placeholder(pending):
+            self.clear_pending_placeholder()
+
+    async def _delete_placeholder(self, pending) -> bool:
+        """Delete one placeholder; False only when it is worth trying again later."""
+        if not isinstance(pending, dict):
+            return True
+        message_id = pending.get("message_id")
+        chat_id = pending.get("chat_id")
+        if type(message_id) is not int or type(chat_id) is not int:
+            return True
+        try:
+            await self.bot.delete_message(chat_id=chat_id, message_id=message_id)
+            logger.info("Removed an abandoned processing placeholder")
+        except NetworkError as error:
+            if isinstance(error, BadRequest):
+                # Already gone, or too old to delete. Do not retry forever.
+                pass
+            else:
+                # Timed out or flood control: worth trying again later.
+                logger.debug("Could not remove an abandoned processing placeholder yet: %s", error)
+                return False
+        except Exception as error:
+            # Forbidden, InvalidToken and anything else will not succeed on a
+            # later turn, so forget the entry instead of retrying forever.
+            logger.warning("Giving up on an abandoned placeholder: %s", error)
+        return True
+
+    def context_metadata_messages(self):
+        """The static trust note and the volatile snapshot, in that order."""
+        if self._context_time is None:
+            return None, None
+        return context_messages(
+            self._context_time,
+            dict(self.chat_data.get("chat_metadata", {})),
+            dict(self.conversation_data.get("topic_metadata", {})),
+            self.chat_data.get("bot_membership"),
+        )
+
+    def context_metadata_message(self):
+        if self._context_time is None:
+            return None
+        return context_message(
+            self._context_time,
+            dict(self.chat_data.get("chat_metadata", {})),
+            dict(self.conversation_data.get("topic_metadata", {})),
+            self.chat_data.get("bot_membership"),
+        )
+
+    def shared_chat_events(self) -> list:
+        """Recent chat-wide changes, without duplicating this transcript's events."""
+        after = self.conversation_data.get("shared_events_after", 0)
+        present = {
+            item.additional_kwargs.get("telegram", {}).get("chat_sequence") for item in self.chat_message_history
+        }
+        # Recorded here once, even if compaction has since folded it into the
+        # summary: it must not come back as a "recent" event.
+        present.update(self.conversation_data.get("stored_chat_sequences", []))
+        return [
+            item
+            for item in self.chat_data.get("shared_chat_events", [])
+            if item.additional_kwargs["telegram"]["chat_sequence"] > after
+            and item.additional_kwargs["telegram"]["chat_sequence"] not in present
+        ][-2:]
+
+    def record_shared_chat_event(self, message) -> None:
+        sequence = self.chat_data.get("chat_event_sequence", 0) + 1
+        self.chat_data["chat_event_sequence"] = sequence
+        message.additional_kwargs.setdefault("telegram", {})["chat_sequence"] = sequence
+        events = self.chat_data.setdefault("shared_chat_events", [])
+        events.append(message)
+        del events[:-16]
+        stored = self.conversation_data.setdefault("stored_chat_sequences", [])
+        stored.append(sequence)
+        del stored[:-16]
+        self.chat_message_history.append(message)
+        self._enforce_history_cap()
+
+    def make_user_message(self, message, *, include_command=False, album=None):
+        """Build the transcript entry; ``album`` lists every message whose photo belongs to it.
+
+        Photos and GIFs are recorded as metadata only. Ingestion replaces the
+        records with downloaded ones; other callers just need the markers.
+        """
+        text = message.text or getattr(message, "caption", None) or ""
+        if not isinstance(text, str):
+            text = ""
+        images = photo_records(album if album is not None else [message], self.settings.image_max_side)
+        animation = animation_record(message)
+        if animation is not None:
+            images.append(animation)
+        if not text.strip() and not images:
+            return None
+        if text.startswith("/") and not include_command:
+            parts = text.split(maxsplit=1)
+            if len(parts) < 2 and not images:
+                return None
+            text = parts[1] if len(parts) > 1 else ""
+        user = getattr(message, "from_user", None)
+        sender = actor_metadata(user)
+        if not sender:
+            sender = actor_metadata(getattr(message, "sender_chat", None))
+        name = sender.get("username") or f"user_{sender.get('id', 'unknown')}"
+        label = sender.get("username") or sender.get("display_name") or str(sender.get("id", "unknown"))
+        additional_kwargs = {"telegram": message_metadata(message)}
+        album_ids = [item.message_id for item in album or [] if type(getattr(item, "message_id", None)) is int]
+        if len(album_ids) > 1:
+            # Every item of an album, in photo order, so an edit of any of them
+            # can be matched to this entry. Kept out of the "telegram" envelope:
+            # it is internal routing, not something the model should read.
+            additional_kwargs["album_message_ids"] = album_ids
+        if images:
+            additional_kwargs["images"] = images
+        return HumanMessage(
+            name=name,
+            content=f"{label}: {text}" if text.strip() else f"{label}:",
+            additional_kwargs=additional_kwargs,
+        )
+
+    def save_assistant_message(self, content: str, message=None) -> None:
+        metadata = message_metadata(message) if message is not None else {}
+        metadata.setdefault("sent_at", utc_now())
+        metadata["sender"] = {"is_bot": True}
+        self.chat_message_history.append(AIMessage(content=content, additional_kwargs={"telegram": metadata}))
+
+    @property
+    def conversation_data(self) -> dict:
+        """The canonical in-process graph conversation, isolated by forum topic."""
+        if self._message_thread_id:
+            return self.chat_data.setdefault("topics", {}).setdefault(self._message_thread_id, {})
+        return self.chat_data
+
+    @property
+    def conversation_lock(self) -> asyncio.Lock:
+        return self.conversation_data.setdefault("lock", asyncio.Lock())
+
+    @staticmethod
+    def _update_key(update):
+        key = getattr(update, "update_id", None)
+        if type(key) is int:
+            return ("update", key)
+        key = getattr(update.effective_message, "message_id", None)
+        return ("message", key) if type(key) is int else None
+
+    def is_processed(self, update) -> bool:
+        """Whether ``accept_update`` already took this update, without recording it."""
+        key = self._update_key(update)
+        return key is not None and key in self.conversation_data.get("processed_updates", [])
+
+    def remember_sent(self, message) -> None:
+        """Record a message the bot sent, independent of retained history."""
+        identifier = getattr(message, "message_id", None)
+        if type(identifier) is not int:
+            return
+        sent = self.conversation_data.setdefault("sent_message_ids", [])
+        if identifier not in sent:
+            sent.append(identifier)
+            del sent[:-1024]
+
+    def sent_by_bot(self, message_id) -> bool:
+        return message_id in self.conversation_data.get("sent_message_ids", [])
+
+    def accept_update(self, update) -> bool:
+        """Deduplicate known Telegram updates, including ones with uncertain sends."""
+        key = self._update_key(update)
+        if key is None:
+            return True
+        seen = self.conversation_data.setdefault("processed_updates", [])
+        if key in seen:
+            return False
+        seen.append(key)
+        del seen[:-512]
+        return True
 
     # Settings
 
@@ -88,6 +452,8 @@ class SectorContext(CallbackContext):
 
     @property
     def bot_llm(self) -> BaseChatModel:
+        if self._request_model is not None:
+            return self._request_model
         try:
             self.bot_data["llm"]
         except KeyError:
@@ -99,61 +465,79 @@ class SectorContext(CallbackContext):
 
     # Chat
 
+    # The system prompt and autoreply mode belong to the conversation, like its
+    # history: each forum topic has its own, and /clear in one topic resets
+    # only that topic.
+
     @property
     def chat_system_prompt(self) -> str:
         try:
-            return self.chat_data["system_prompt"]
+            return self.conversation_data["system_prompt"]
         except KeyError:
             return self.settings.system_prompts.default
 
     @chat_system_prompt.setter
     def chat_system_prompt(self, new_prompt: str) -> None:
-        self.chat_data["system_prompt"] = new_prompt
+        self.conversation_data["system_prompt"] = new_prompt
 
     @property
     def chat_autoreply_mode(self) -> bool:
         try:
-            return self.chat_data["autoreply_mode"]
+            return self.conversation_data["autoreply_mode"]
         except KeyError:
-            self.chat_data["autoreply_mode"] = True
+            self.conversation_data["autoreply_mode"] = True
             return True
 
     @chat_autoreply_mode.setter
     def chat_autoreply_mode(self, mode: bool) -> None:
-        self.chat_data["autoreply_mode"] = mode
+        self.conversation_data["autoreply_mode"] = mode
 
     @property
     def chat_message_history(self) -> list:
         """The recent transcript, compacted before it can outgrow the server's window."""
         try:
-            return self.chat_data["message_history"]
+            return self.conversation_data["message_history"]
         except KeyError:
-            self.chat_data["message_history"] = []
-            return self.chat_data["message_history"]
+            self.conversation_data["message_history"] = []
+            return self.conversation_data["message_history"]
 
     @chat_message_history.setter
     def chat_message_history(self, new_history: list) -> None:
-        self.chat_data["message_history"] = new_history
+        self.conversation_data["message_history"] = new_history
 
     @property
     def context_summary(self) -> str:
         """A terse summary of messages that were compacted out of the history."""
-        summary = self.chat_data.get("context_summary")
+        summary = self.conversation_data.get("context_summary")
         return summary if isinstance(summary, str) else ""
 
     @context_summary.setter
     def context_summary(self, summary: str) -> None:
         if summary:
-            self.chat_data["context_summary"] = summary
+            self.conversation_data["context_summary"] = summary
         else:
-            self.chat_data.pop("context_summary", None)
+            self.conversation_data.pop("context_summary", None)
 
     def clear_history(self) -> None:
         """Drop the transcript, its summary, and anything counted from them."""
-        self.chat_data["message_history"] = []
-        self.chat_data.pop("context_summary", None)
-        self.chat_data.pop("context_compaction", None)
-        self.chat_data.pop("token_count", None)
+        for key in (
+            "message_history",
+            "context_summary",
+            "context_compaction",
+            "token_count",
+            "tool_schemas",
+            "active_tool_call_id",
+            "started_tool_call_ids",
+            "interrupted_delivery",
+            "ingested_messages",
+            "message_edits",
+        ):
+            self.conversation_data.pop(key, None)
+        self.conversation_data["shared_events_after"] = self.chat_data.get("chat_event_sequence", 0)
+        polls = self.bot_data.get("tracked_polls", {})
+        for poll_id, origin in list(polls.items()):
+            if origin["chat_id"] == self._chat_id and origin["thread_id"] == self._message_thread_id:
+                polls.pop(poll_id, None)
 
     @property
     def chat_svg_size(self) -> int:
@@ -171,9 +555,22 @@ class SectorContext(CallbackContext):
     # Methods
 
     async def get_username(self) -> str:
+        """The bot's @username, read from the profile cached at startup.
+
+        ``Application.initialize`` calls ``get_me`` before polling, so the bot's
+        user is already known and this needs no request. Asking Telegram again
+        put a network round trip on the engagement path of every message, and a
+        connect timeout there failed the turn instead of answering it.
+        """
         if self._username:
             return self._username
-        me = await self.application.bot.get_me()
+        bot = self.application.bot
+        username = getattr(bot, "username", None)
+        if username:
+            self._username = username
+            return username
+        # Only before the application is initialized, or with a stub bot.
+        me = await bot.get_me()
         self._username = me.username
         return self._username
 
@@ -186,8 +583,16 @@ class SectorContext(CallbackContext):
         """
         # In-place credential changes skip the settings setter; the log
         # formatter still needs to learn the new value before it is used.
-        register_secrets(self.settings)
         name = model_name or self.settings.default_model
+        result = self.create_model(name)
+        self.bot_data["llm"] = result
+        self.bot_data["model_name"] = name
+        self.bot_data["llm_config"] = self._model_config(name)
+        return result
+
+    def create_model(self, name: str) -> BaseChatModel:
+        """Build a request-local client without changing the bot's selected model."""
+        register_secrets(self.settings)
         if self.settings.llm_provider == "openai":
             result = ChatOpenAI(
                 model=name,
@@ -202,6 +607,8 @@ class SectorContext(CallbackContext):
                 use_responses_api=False,
                 # One slow local request should not double the configured timeout.
                 max_retries=0,
+                # Off by default: older compatible servers reject stream_options.
+                stream_usage=self.settings.stream_usage,
             )
         else:
             result = ChatOllama(
@@ -209,9 +616,6 @@ class SectorContext(CallbackContext):
                 base_url=self.settings.ollama_url,
                 client_kwargs={"timeout": self.settings.llm_timeout, "headers": self.settings.llm_headers},
             )
-        self.bot_data["llm"] = result
-        self.bot_data["model_name"] = name
-        self.bot_data["llm_config"] = self._model_config(name)
         return result
 
     def _model_config(self, name: str) -> tuple:
@@ -226,15 +630,24 @@ class SectorContext(CallbackContext):
             self.settings.llm_timeout,
             hash(headers),
             hash(key),
+            self.settings.stream_usage,
+            self.settings.prompt_cache_mode,
+            self.settings.prompt_cache_key_prefix,
+            self.settings.prompt_cache_retention,
+            self.settings.prompt_cache_ttl,
         )
 
     def _refresh_model_if_settings_changed(self) -> None:
         """Rebuild the client when settings changed in-process, so probes use it."""
+        if self._request_model is not None:
+            return
         config = self.bot_data.get("llm_config")
         if config is not None and config != self._model_config(self.get_model()):
             self.load_model(self.get_model())
 
     def get_model(self) -> str:
+        if self._request_model_name is not None:
+            return self._request_model_name
         if "model_name" in self.bot_data:
             return self.bot_data["model_name"]
         model = self.bot_data.get("llm")
@@ -243,6 +656,110 @@ class SectorContext(CallbackContext):
             if isinstance(name, str):
                 return name
         return self.settings.default_model
+
+    @property
+    def endpoint_host(self) -> str:
+        """The configured host, without credentials or a full path."""
+        provider = self.settings.llm_provider
+        endpoint = self.settings.openai_base_url if provider == "openai" else self.settings.ollama_url
+        return urlsplit(endpoint).hostname or endpoint
+
+    def cache_backend(self) -> str:
+        """Which cache controls this endpoint is known to accept.
+
+        Self-hosted OpenAI-compatible servers often do prefix caching on their
+        own, but vendor-only request fields can be rejected. ``auto`` therefore
+        stays quiet unless the host is recognizable.
+        """
+        mode = self.settings.prompt_cache_mode
+        if mode == "off":
+            return "off"
+        if self.settings.llm_provider != "openai":
+            # The native Ollama client has no fields for these controls.
+            return "none"
+        if mode in {"openai", "openrouter"}:
+            return mode
+        host = self.endpoint_host.lower()
+        if "openrouter.ai" in host:
+            return "openrouter"
+        if host == "api.openai.com" or host.endswith(".openai.azure.com"):
+            return "openai"
+        return "none"
+
+    def cache_setting_warnings(self) -> list[str]:
+        """Settings that the resolved cache backend will ignore, for a startup log."""
+        backend = self.cache_backend()
+        ttl = self.settings.prompt_cache_ttl
+        warnings = []
+        if ttl == "30m" and backend != "openai":
+            warnings.append(f"SECTOR_AI_PROMPT_CACHE_TTL=30m only applies to OpenAI; the cache backend is {backend}")
+        if ttl == "1h" and backend != "openrouter":
+            warnings.append(f"SECTOR_AI_PROMPT_CACHE_TTL=1h only applies to OpenRouter; the cache backend is {backend}")
+        if self.settings.prompt_cache_retention and backend != "openai":
+            warnings.append(f"SECTOR_AI_PROMPT_CACHE_RETENTION only applies to OpenAI; the cache backend is {backend}")
+        if self.settings.prompt_cache_retention and ttl == "30m":
+            warnings.append(
+                "SECTOR_AI_PROMPT_CACHE_TTL=30m wins over SECTOR_AI_PROMPT_CACHE_RETENTION; "
+                "OpenAI accepts only one of the two, so retention is not sent"
+            )
+        return warnings
+
+    def cache_request_options(self, workload: str) -> dict:
+        """Request-local cache affinity, never credentials or prompt content."""
+        backend = self.cache_backend()
+        if backend in {"off", "none"}:
+            return {}
+        prefix = self.settings.prompt_cache_key_prefix.strip() or "sector-ai"
+        key = f"{prefix}:{self._chat_id}:{self._message_thread_id}:{workload}"[:64]
+        if backend == "openai":
+            options = {"prompt_cache_key": key}
+            # OpenAI rejects a request that sets both lifetime fields, so the
+            # explicit TTL wins and retention is left out (warned at startup).
+            if self.settings.prompt_cache_ttl == "30m":
+                options["prompt_cache_options"] = {"mode": "implicit", "ttl": "30m"}
+            elif self.settings.prompt_cache_retention:
+                options["prompt_cache_retention"] = self.settings.prompt_cache_retention
+            return options
+        if backend == "openrouter":
+            # Session affinity keeps a conversation on the provider holding the
+            # cache. Top-level cache_control enables automatic caching on
+            # Anthropic-style routes and is ignored by providers without it.
+            extra = {"session_id": key, "cache_control": {"type": "ephemeral"}}
+            if self.settings.prompt_cache_ttl == "1h":
+                extra["cache_control"]["ttl"] = "1h"
+            return {"extra_body": extra}
+        return {}
+
+    def bind_cache(self, model, workload: str):
+        """Bind cache affinity to one request without mutating the shared model."""
+        options = self.cache_request_options(workload)
+        return model.bind(**options) if options else model
+
+    def usage_summary(self) -> list[dict]:
+        stats = self.bot_data.get("usage_stats")
+        if not isinstance(stats, dict):
+            return []
+        rows = []
+        for (model, workload), entry in sorted(stats.items()):
+            if not isinstance(entry, dict):
+                continue
+            input_tokens = entry.get("input_tokens", 0)
+            cache_read = entry.get("cache_read", 0)
+            cached_input = entry.get("cache_input_tokens", 0)
+            rows.append(
+                {
+                    "model": model,
+                    "workload": workload,
+                    "requests": entry.get("requests", 0),
+                    "input_tokens": input_tokens,
+                    "output_tokens": entry.get("output_tokens", 0),
+                    "cache_read": cache_read,
+                    "cache_write": entry.get("cache_write", 0),
+                    # None when no request in this row reported cache data.
+                    "hit_rate": (100.0 * cache_read / cached_input) if cached_input else None,
+                }
+            )
+        return rows
 
     async def get_model_details(self) -> dict:
         if self.settings.llm_provider != "ollama":
@@ -317,9 +834,16 @@ class SectorContext(CallbackContext):
         return headers
 
     def _label_models(self, models: list) -> list:
+        mode = image_mode(self.settings)
         for r in models:
             r["is_default_active"] = r["model"] == self.get_model()
-            r["is_vision_active"] = r["model"] == self.settings.vision_model
+            # The model that actually reads photos: the default one in native
+            # mode, the describing one in describe mode, none when off.
+            r["is_vision_active"] = (
+                r["is_default_active"]
+                if mode == "native"
+                else mode == "describe" and r["model"] == self.settings.vision_model
+            )
             r["label"] = (
                 f"{'✅ ' if r['is_default_active'] else ''}{'👁️‍🗨️ ' if r['is_vision_active'] else ''}{r['model']}"
             )
@@ -475,7 +999,7 @@ class SectorContext(CallbackContext):
         self._refresh_model_if_settings_changed()
         messages = await self._current_context_messages()
         fingerprint = self._token_count_fingerprint(messages)
-        cached = self.chat_data.get("token_count")
+        cached = self.conversation_data.get("token_count")
         if isinstance(cached, dict) and cached.get("fingerprint") == fingerprint:
             cached_tokens = cached.get("tokens")
             if isinstance(cached_tokens, int):
@@ -491,30 +1015,69 @@ class SectorContext(CallbackContext):
                 tokens = await self._probe_token_count(messages)
             except Exception:
                 logger.warning("Exact token count failed; using a local estimate", exc_info=True)
-                tokens = self._estimate_token_count(messages)
+                tokens = self._estimate_token_count(messages, include_tools=True)
                 exact = False
 
-        self.chat_data["token_count"] = {"fingerprint": fingerprint, "tokens": tokens, "exact": exact}
+        self.conversation_data["token_count"] = {"fingerprint": fingerprint, "tokens": tokens, "exact": exact}
         return tokens
 
-    def _estimate_token_count(self, messages: list[BaseMessage]) -> int:
+    def _estimate_token_count(self, messages: list[BaseMessage], *, include_tools: bool = False) -> int:
         """A dependency-free fallback; conservative for non-ASCII text."""
-        text = "\n".join(message_text(message) for message in messages)
-        return _estimate_text_tokens(text)
+        text = "\n".join(prompt_history_text(message) for message in messages)
+        if include_tools:
+            text += json.dumps(self.conversation_data.get("tool_schemas", []), ensure_ascii=False)
+        # Image blocks are pixels, not text; estimate them from their size.
+        patch = self.settings.image_patch_px
+        return _estimate_text_tokens(text) + sum(message_image_tokens(message, patch) for message in messages)
 
     @property
     def token_count_is_exact(self) -> bool:
-        cached = self.chat_data.get("token_count")
+        cached = self.conversation_data.get("token_count")
         return bool(isinstance(cached, dict) and cached.get("exact"))
 
     def _token_count_fingerprint(self, messages: list[BaseMessage]) -> tuple:
+        # The snapshot's clock changes on every update without changing the
+        # size (the timestamp has a fixed width), so it must not defeat reuse.
         return (
             *self._model_config(self.get_model()),
-            tuple((m.type, getattr(m, "name", None), repr(m.content)) for m in messages),
+            tuple(
+                (m.type, getattr(m, "name", None), _VOLATILE_TIME.sub("", prompt_history_text(m)), image_signature(m))
+                for m in messages
+            ),
+            repr(self.conversation_data.get("tool_schemas", [])),
         )
+
+    async def prompt_exceeds(self, estimate: int, budget: int, ratio: float = 0.9) -> bool:
+        """Whether the current prompt is over ``ratio`` of the window.
+
+        An estimate between the line and the full window is confirmed by an
+        exact count before a turn fails on it, because the estimate
+        deliberately errs high. Above the window it is not: probing an
+        oversized prompt costs a request, and a server that silently truncates
+        (Ollama) would report a count that looks like it fits.
+        """
+        if estimate <= budget * ratio:
+            return False
+        if estimate > budget:
+            return True
+        try:
+            tokens = await self.count_context_tokens()
+        except Exception:
+            logger.warning("Could not confirm the prompt size; using the estimate", exc_info=True)
+            return True
+        return not self.token_count_is_exact or tokens > budget * ratio
 
     async def _count_with_openai_endpoint(self, messages: list[BaseMessage]) -> int | None:
         """Use ``/responses/input_tokens`` when the server has it, which costs nothing."""
+        # This endpoint's Responses projection would omit Chat Completions tool
+        # calls/results. Use the exact chat probe instead of undercounting them.
+        if self.conversation_data.get("tool_schemas") or any(
+            getattr(m, "tool_calls", None) or m.type == "tool" for m in messages
+        ):
+            return None
+        # The text projection below would drop images and undercount them.
+        if has_image_blocks(messages):
+            return None
         endpoint = self.settings.openai_base_url.rstrip("/")
         unavailable = self.bot_data.setdefault("token_count_unavailable", set())
         if endpoint in unavailable:
@@ -523,7 +1086,7 @@ class SectorContext(CallbackContext):
         instructions = []
         input_items = []
         for message in messages:
-            text = message_text(message)
+            text = history_text(message)
             if message.type == "system":
                 instructions.append(text)
             elif message.type == "human":
@@ -558,15 +1121,20 @@ class SectorContext(CallbackContext):
 
     async def _probe_token_count(self, messages: list[BaseMessage]) -> int:
         """Ask the model for one token and read the prompt count it reports."""
+        model = self.bot_llm
+        schemas = self.conversation_data.get("tool_schemas", [])
+        if schemas:
+            model = model.bind_tools(schemas)
+        probe_model = self.bind_cache(model, "token_probe")
         if self.settings.llm_provider == "ollama":
-            probe = self.bot_llm.bind(options={"num_predict": 1})
+            probe = probe_model.bind(options={"num_predict": 1})
         elif self._uses_responses_api():
             # LangChain turns max_tokens into the Responses API's max_output_tokens.
-            probe = self.bot_llm.bind(max_tokens=1)
+            probe = probe_model.bind(max_tokens=1)
         else:
             # ChatOpenAI rewrites max_tokens to max_completion_tokens, which
             # Ollama ignores, so put max_tokens straight into the request body.
-            probe = self.bot_llm.bind(extra_body={"max_tokens": 1})
+            probe = probe_model.bind(extra_body={"max_tokens": 1})
 
         try:
             response = await probe.ainvoke(messages)
@@ -575,11 +1143,12 @@ class SectorContext(CallbackContext):
                 raise
             if self._uses_responses_api():
                 # Some Responses models reject a one-token cap.
-                response = await self.bot_llm.bind(extra_body={"max_output_tokens": 16}).ainvoke(messages)
+                response = await probe_model.bind(extra_body={"max_output_tokens": 16}).ainvoke(messages)
             else:
                 # Newer OpenAI models only accept max_completion_tokens.
-                response = await self.bot_llm.bind(extra_body={"max_completion_tokens": 16}).ainvoke(messages)
+                response = await probe_model.bind(extra_body={"max_completion_tokens": 16}).ainvoke(messages)
 
+        record_usage(self, "token_probe", response)
         tokens = (getattr(response, "usage_metadata", None) or {}).get("input_tokens")
         if not isinstance(tokens, int) or isinstance(tokens, bool) or tokens <= 0:
             raise RuntimeError("the model server did not report prompt tokens")
@@ -603,7 +1172,14 @@ class SectorContext(CallbackContext):
         Returns True when a compaction happened. Any failure leaves the
         transcript in place where possible, and the request is still made to fit
         by dropping the oldest messages as a last resort.
+
+        Photos waiting for a description are described first (describe mode
+        only), so the estimate and the next request see the final text.
         """
+        try:
+            await describe_pending_images(self)
+        except Exception:
+            logger.warning("Describing pending photos failed", exc_info=True)
         try:
             if not self.settings.compaction_enabled:
                 self._enforce_history_cap()
@@ -613,13 +1189,16 @@ class SectorContext(CallbackContext):
 
             budget = await self.get_context_budget()
             threshold = self.settings.compaction_threshold
-            estimate = self._estimate_token_count(await self._current_context_messages())
+            estimate = self._estimate_token_count(await self._current_context_messages(), include_tools=True)
             # A cheap preflight that scales with the configured threshold. The
             # real window and the exact count are resolved past this point.
             if estimate < budget * threshold * 0.5:
                 return False
 
-            tokens = await self.count_context_tokens()
+            # A one-token counting probe is itself an inference request. Do
+            # not send an already oversized prompt merely to discover its
+            # exact size; compact using the conservative estimate instead.
+            tokens = estimate if estimate > budget * 0.9 else await self.count_context_tokens()
             if tokens <= budget * threshold:
                 return False
 
@@ -652,7 +1231,10 @@ class SectorContext(CallbackContext):
         # summarize; a forced compaction on a short history still makes progress.
         keep = max(1, min(self.settings.compaction_keep_messages, len(history) - 1))
 
-        evicted = history[:-keep]
+        cut = safe_cut(history, len(history) - keep)
+        if cut == 0:
+            return {"compacted": False, "evicted": 0, "kept": len(history), "summary": self.context_summary}
+        evicted = history[:cut]
         max_chars = self.settings.compaction_summary_max_chars
         budget = await self.get_context_budget()
         summary = self.context_summary
@@ -664,20 +1246,25 @@ class SectorContext(CallbackContext):
             chunk, remaining = self._take_summary_chunk(remaining, capacity)
             summary = await self._summarize_chunk(summary, chunk, max_chars)
 
-        self.chat_data["message_history"] = history[-keep:]
+        # The prompt prefix changes here anyway, so this is where older photos
+        # are detached without costing an extra cache miss.
+        kept, detached = detach_images(history[cut:], self.settings.image_history_limit)
+        if detached:
+            logger.info("Detached %s older photos during compaction", detached)
+        self.chat_message_history = kept
         self.context_summary = summary
-        self.chat_data["context_compaction"] = {
+        self.conversation_data["context_compaction"] = {
             "evicted": len(evicted),
             "kept": len(history) - len(evicted),
             "at": time(),
         }
-        self.chat_data.pop("token_count", None)
+        self.conversation_data.pop("token_count", None)
         logger.info("Compacted %s messages into a %s character summary", len(evicted), len(summary))
         return {"compacted": True, "evicted": len(evicted), "kept": len(history) - len(evicted), "summary": summary}
 
     async def _summarize_chunk(self, previous: str, messages: list, max_chars: int) -> str:
         system_prompt = self.settings.system_prompts.compaction.replace("{MAX_CHARS}", str(max_chars))
-        transcript = "\n".join(f"[{message.type}] {message_text(message)}" for message in messages)
+        transcript = "\n".join(f"[{message.type}] {history_text(message)}" for message in messages)
         prompt = [
             SystemMessage(content=system_prompt),
             HumanMessage(
@@ -688,10 +1275,11 @@ class SectorContext(CallbackContext):
             ),
         ]
 
-        response = await self.bot_llm.ainvoke(prompt)
+        response = await self.bind_cache(self.bot_llm, "compaction").ainvoke(prompt)
+        record_usage(self, "compaction", response)
         if message_refused(response):
             raise RuntimeError("the model refused to summarize the transcript")
-        summary = message_text(response).strip()
+        summary = strip_internal_envelope(message_text(response)).strip()
         if not summary:
             raise RuntimeError("the model returned an empty summary")
         return summary[:max_chars]
@@ -711,14 +1299,17 @@ class SectorContext(CallbackContext):
         chunk = []
         tokens = 0
         for index, message in enumerate(messages):
-            text = message_text(message)
+            text = history_text(message)
             size = _estimate_text_tokens(text)
             if size > limit:
                 pieces = _split_text(text, limit)
                 if chunk:
                     return chunk, messages[index:]
-                rest = [HumanMessage(content=piece) for piece in pieces[1:]] + messages[index + 1 :]
-                return [HumanMessage(content=pieces[0])], rest
+                # Keep the speaker: the bot's long text must not be summarized
+                # as if a user wrote it.
+                role = AIMessage if isinstance(message, AIMessage) else HumanMessage
+                rest = [role(content=piece) for piece in pieces[1:]] + messages[index + 1 :]
+                return [role(content=pieces[0])], rest
             if chunk and tokens + size > limit:
                 return chunk, messages[index:]
             chunk.append(message)
@@ -736,27 +1327,32 @@ class SectorContext(CallbackContext):
         limit = budget * self.settings.compaction_threshold * 0.9
         history = self.chat_message_history
 
+        def estimate(messages) -> int:
+            # Count history as it is sent, attached photos included.
+            return self._estimate_token_count(self._prompt_projection(messages))
+
         async def overhead() -> int:
-            full = self._estimate_token_count(await self._current_context_messages())
-            return max(0, full - self._estimate_token_count(history))
+            full = self._estimate_token_count(await self._current_context_messages(), include_tools=True)
+            return max(0, full - estimate(history))
 
         # The newest message stays whatever happens, so the summary must leave
         # room for it as well as for the system prompt.
-        newest = self._estimate_token_count(history[-1:]) if history else 0
+        groups = history_groups(history)
+        newest = estimate(groups[-1]) if groups else 0
         while self.context_summary and await overhead() + newest > limit:
             summary = self.context_summary
             self.context_summary = summary[: len(summary) // 2]
 
         base = await overhead()
         keep_from = 0
-        while len(history) - keep_from > 1 and base + self._estimate_token_count(history[keep_from:]) > limit:
-            keep_from += 1
+        while len(groups) > 1 and base + estimate(history[keep_from:]) > limit:
+            keep_from += len(groups.pop(0))
         if keep_from:
-            self.chat_data["message_history"] = history[keep_from:]
-            self.chat_data.pop("token_count", None)
+            self.chat_message_history = history[keep_from:]
+            self.conversation_data.pop("token_count", None)
             logger.warning("Dropped %s messages to fit the context window", keep_from)
 
-        final = self._estimate_token_count(await self._current_context_messages())
+        final = self._estimate_token_count(await self._current_context_messages(), include_tools=True)
         if final > limit:
             logger.warning("The context still estimates %s tokens over the window", final - limit)
 
@@ -765,28 +1361,64 @@ class SectorContext(CallbackContext):
         history = self.chat_message_history
         cap = self.settings.compaction_max_messages
         if len(history) > cap:
-            self.chat_data["message_history"] = history[-cap:]
-            self.chat_data.pop("token_count", None)
+            self.chat_message_history = history[safe_cut(history, len(history) - cap) :]
+            self.conversation_data.pop("token_count", None)
             logger.warning("History exceeded %s messages; dropped the oldest ones", cap)
 
     async def _current_context_messages(self) -> list:
-        return self.get_templated_messages().format_messages(**(await self.get_system_template_dict()))
-
-    def save_user_message(self, message: Message) -> bool:
-        text = message.text
-        if text.startswith("/"):
-            text = text.split(maxsplit=1)
-            if len(text) > 1:
-                text = text[-1]
-            else:
-                return False
-        self.chat_message_history.append(
-            HumanMessage(name=message.from_user.username, content=f"{message.from_user.username}: {text}")
+        has_tools = bool(self.conversation_data.get("tool_schemas"))
+        messages = self.get_templated_messages(tool_history=has_tools).format_messages(
+            **(await self.get_system_template_dict())
         )
+        if has_tools:
+            messages.insert(1, SystemMessage(content=AGENT_SYSTEM_PROMPT))
+        return messages
+
+    def save_user_message(self, message: Message, *, include_command: bool = False, album=None, images=None) -> bool:
+        """Append one incoming message; ``images`` are downloaded photo records."""
+        event = SectorContext.make_user_message(self, message, include_command=include_command, album=album)
+        if event is None:
+            return False
+        if images:
+            event = with_images(event, images)
+        seen = self.conversation_data.setdefault("ingested_messages", [])
+        message_id = getattr(message, "message_id", None)
+        if type(message_id) is int and message_id in seen:
+            return True
+        for item in album or [message]:
+            identifier = getattr(item, "message_id", None)
+            if type(identifier) is int and identifier not in seen:
+                seen.append(identifier)
+        del seen[:-512]
+        self.chat_message_history.append(event)
         # Messages arrive even when autoreply stays silent, so the cap cannot
         # wait for the reply path.
         self._enforce_history_cap()
+        if images:
+            self._enforce_image_cap()
         return True
+
+    def _enforce_image_cap(self) -> None:
+        """Bound attached images (and their memory) even when the bot stays silent.
+
+        Detaching goes down to ``image_history_limit`` in one step, so the
+        cache-breaking change happens once rather than on every new image.
+        """
+        cap = self.settings.image_max_attached
+        history = self.chat_message_history
+        if not cap or attached_count(history) <= cap:
+            return
+        kept, detached = detach_images(history, min(self.settings.image_history_limit, cap))
+        if detached:
+            self.chat_message_history = kept
+            self.conversation_data.pop("token_count", None)
+            logger.info("More than %s images attached; detached %s older ones", cap, detached)
+
+    def _prompt_projection(self, messages: list) -> list:
+        """Render history as the model receives it, with photos attached in native mode."""
+        native = image_mode(self.settings) == "native"
+        rendered = [render_prompt_message(message) for message in messages]
+        return [attach_images(message) for message in rendered] if native else rendered
 
     def message_exists(self, new_message: ChatMessage) -> bool:
         return any(
@@ -801,15 +1433,33 @@ class SectorContext(CallbackContext):
             "USERNAME": username,
         }
 
-    def get_templated_messages(self, system_prompt=None, num_history=None) -> ChatPromptTemplate:
+    def get_templated_messages(self, system_prompt=None, num_history=None, *, tool_history=False) -> ChatPromptTemplate:
         # logger.info(f"System Prompt: {system_prompt or self.chat_system_prompt}")
         system_prompt = system_prompt or self.chat_system_prompt
         included_history = (
-            self.chat_message_history if num_history is None else list(self.chat_message_history)[-num_history:]
+            self.chat_message_history
+            if num_history is None
+            else list(self.chat_message_history)[
+                safe_cut(self.chat_message_history, max(0, len(self.chat_message_history) - num_history)) :
+            ]
         )
-        messages = [SystemMessagePromptTemplate.from_template(template=system_prompt)]
+        if not tool_history:
+            included_history = plain_history(included_history)
+        # The prompt is text a person can edit (/system, /characterize), so its
+        # braces are literal. Only the placeholders every prompt may use stay
+        # active; anything else used to raise "Invalid format specifier" on
+        # every turn until /clear.
+        messages = [SystemMessagePromptTemplate.from_template(template=_escape_prompt_braces(system_prompt))]
+        static, dynamic = self.context_metadata_messages()
+        if static is not None:
+            messages.append(static)
         if self.context_summary:
             # A separate message keeps a user-supplied prompt's braces intact.
             messages.append(SystemMessage(content=f"Summary of the earlier conversation:\n{self.context_summary}"))
-        messages.extend(included_history)
+        # Retained history comes before changing shared events and the current
+        # snapshot so the longest possible prompt prefix stays reusable.
+        messages.extend(self._prompt_projection(included_history))
+        messages.extend(render_prompt_message(message) for message in self.shared_chat_events())
+        if dynamic is not None:
+            messages.append(dynamic)
         return ChatPromptTemplate.from_messages(messages)

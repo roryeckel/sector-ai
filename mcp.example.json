@@ -1,0 +1,12 @@
+{
+  "servers": {
+    "search": {
+      "transport": "http",
+      "url": "http://localhost:8000/mcp",
+      "allowed_tools": ["search"],
+      "allowed_chat_ids": [],
+      "connect_timeout": 10,
+      "tool_timeout": 60
+    }
+  }
+}

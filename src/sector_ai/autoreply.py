@@ -3,6 +3,8 @@ import logging
 from telegram import Update
 
 from .decision import make_decision
+from .gifs import message_animation
+from .history import scoped_control
 from .retry import retry_on_network_error
 from .sector_context import SectorContext
 
@@ -10,13 +12,24 @@ logger = logging.getLogger(__name__)
 
 
 async def should_respond(update: Update, context: SectorContext) -> bool | str:
-    if context.save_user_message(update.message) and context.chat_autoreply_mode:
+    """Engagement only: ingestion belongs to the graph, not this decision."""
+    message = update.effective_message
+    text = message.text or getattr(message, "caption", None) or ""
+    if not isinstance(text, str):
+        text = ""
+    photos = getattr(message, "photo", None)
+    has_photo = isinstance(photos, (list, tuple)) and bool(photos)
+    has_animation = message_animation(message) is not None
+    if context.chat_autoreply_mode and (text or has_photo or has_animation) and not text.startswith("/"):
+        incoming = text or ("[gif without a caption]" if has_animation else "[photo without a caption]")
         try:
+            context.bind_update(update)
             should_respond = await retry_on_network_error(
                 lambda: make_decision(
-                    context.settings.system_prompts.decide,
+                    context.settings.system_prompts.decide_autoreply,
                     context,
-                    partial_variables={"input": update.effective_message.text},
+                    partial_variables={"input": incoming},
+                    update=update,
                 ),
                 what="Autoreply decision",
             )
@@ -31,7 +44,9 @@ async def should_respond(update: Update, context: SectorContext) -> bool | str:
         return should_respond
 
 
+@scoped_control
 async def autoreply_cmd(update: Update, context: SectorContext) -> None:
+    """Toggle autoreply for this conversation (this forum topic only)."""
     current_mode = context.chat_autoreply_mode
     context.chat_autoreply_mode = not current_mode
     await update.message.reply_text(
